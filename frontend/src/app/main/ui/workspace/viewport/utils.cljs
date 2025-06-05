@@ -27,6 +27,7 @@
     :create-artboard (cur/get-static "create-artboard")
     :create-rectangle (cur/get-static "create-rectangle")
     :create-ellipse (cur/get-static "create-ellipse")
+    :resize-ew (cur/get-static "resize-ew")
     :pen (cur/get-static "pen")
     :pencil (cur/get-static "pencil")
     :create-shape (cur/get-static "create-shape")

@@ -741,7 +741,7 @@
                       (fn [[_ target-frame drop-index drop-cell]]
                         (let [undo-id (js/Symbol)]
                           (rx/of (dwu/start-undo-transaction undo-id)
-                                 ;; (dwm/apply-modifiers {:undo-transation? false})
+                                 ;; (dwm/apply-modifiers {:undo-transaction? false})
                                  (move-shapes-to-frame ids target-frame drop-index drop-cell)
                                  (finish-transform)
                                  (dwu/commit-undo-transaction undo-id)))))))
@@ -773,7 +773,7 @@
                       (fn [[_ target-frame drop-index drop-cell]]
                         (let [undo-id (js/Symbol)]
                           (rx/of (dwu/start-undo-transaction undo-id)
-                                 (dwm/apply-modifiers {:undo-transation? false})
+                                 (dwm/apply-modifiers {:undo-transaction? false})
                                  (move-shapes-to-frame ids target-frame drop-index drop-cell)
                                  (finish-transform)
                                  (dwu/commit-undo-transaction undo-id)))))))))))))))
@@ -998,7 +998,9 @@
                          (cfh/get-parent-frame objects shape))
 
              delta     (calculate-delta position bbox frame)
-             modifiers (dwm/create-modif-tree [id] (ctm/move-modifiers delta))]
+             modifiers (dwm/create-modif-tree [id] (ctm/move-modifiers delta))
+
+             undo-transaction? (get options :undo-transaction? true)]
 
 
          (if (features/active-feature? state "render-wasm/v1")
@@ -1011,7 +1013,8 @@
                                         :page-id page-id
                                         :ignore-constraints false
                                         :ignore-touched (:ignore-touched options)
-                                        :ignore-snap-pixel true}))))))))
+                                        :ignore-snap-pixel true
+                                        :undo-transaction? undo-transaction?}))))))))
 
 (defn position-shapes
   [shapes]

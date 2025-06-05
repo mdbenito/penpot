@@ -218,10 +218,11 @@
         on-size-change
         (mf/use-fn
          (mf/deps ids)
-         (fn [value attr]
+         (fn [value attr in-transaction?]
            (binding [cts/*wasm-sync* true]
              (st/emit! (udw/trigger-bounding-box-cloaking ids)
-                       (udw/update-dimensions ids attr value)))))
+                       (udw/update-dimensions ids attr value
+                                              {:undo-transaction? (not in-transaction?)})))))
 
         on-proportion-lock-change
         (mf/use-fn
@@ -233,26 +234,28 @@
         ;; POSITION
         do-position-change
         (mf/use-fn
-         (fn [shape' value attr]
-           (st/emit! (udw/update-position (:id shape') {attr value}))))
+         (fn [shape' value attr in-transaction?]
+           (st/emit! (udw/update-position (:id shape') {attr value}
+                                          {:undo-transaction? (not in-transaction?)}))))
 
         on-position-change
         (mf/use-fn
          (mf/deps ids)
-         (fn [value attr]
+         (fn [value attr in-transaction?]
            (st/emit! (udw/trigger-bounding-box-cloaking ids))
            (binding [cts/*wasm-sync* true]
-             (run! #(do-position-change %1 value attr) shapes))))
+             (run! #(do-position-change %1 value attr in-transaction?) shapes))))
 
         ;; ROTATION
 
         on-rotation-change
         (mf/use-fn
          (mf/deps ids)
-         (fn [value]
+         (fn [value _ ^boolean in-transaction?]
            (binding [cts/*wasm-sync* true]
              (st/emit! (udw/trigger-bounding-box-cloaking ids)
-                       (udw/increase-rotation ids value)))))
+                       (udw/increase-rotation ids value {}
+                                              {:undo-transaction? (not in-transaction?)})))))
 
         on-width-change #(on-size-change % :width)
         on-height-change #(on-size-change % :height)
@@ -349,6 +352,7 @@
                              :placeholder (if (= :multiple (:width values)) (tr "settings.multiple") "--")
                              :on-change on-width-change
                              :disabled disabled-width-sizing?
+                             :drag-direction "ew"
                              :class (stl/css :numeric-input)
                              :value (:width values)}]]
         [:div {:class (stl/css-case :height true
@@ -359,6 +363,7 @@
                              :no-validate true
                              :placeholder (if (= :multiple (:height values)) (tr "settings.multiple") "--")
                              :on-change on-height-change
+                             :drag-direction "ns"
                              :disabled disabled-height-sizing?
                              :class (stl/css :numeric-input)
                              :value (:height values)}]]
@@ -378,6 +383,7 @@
          [:> numeric-input* {:no-validate true
                              :placeholder (if (= :multiple (:x values)) (tr "settings.multiple") "--")
                              :on-change on-pos-x-change
+                             :drag-direction "ew"
                              :disabled disabled-position-x?
                              :class (stl/css :numeric-input)
                              :value (:x values)}]]
@@ -390,6 +396,7 @@
                              :placeholder (if (= :multiple (:y values)) (tr "settings.multiple") "--")
                              :disabled disabled-position-y?
                              :on-change on-pos-y-change
+                             :drag-direction "ew"
                              :class (stl/css :numeric-input)
                              :value (:y values)}]]])
      (when (or (options :rotation) (options :radius))
@@ -405,6 +412,7 @@
              :data-wrap true
              :placeholder (if (= :multiple (:rotation values)) (tr "settings.multiple") "--")
              :on-change on-rotation-change
+             :drag-direction "rotate"
              :class (stl/css :numeric-input)
              :value (:rotation values)}]])
         (when (options :radius)
