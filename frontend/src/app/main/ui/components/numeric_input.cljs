@@ -127,28 +127,24 @@
    After an interval of inactivity, the transaction is committed.
 
    Args:
+     direction:      keyword indicating direction to listen to (:ew, :we, :ns, :sn)
      wheel-stream:   a stream of mouse wheel events
      set-delta:      function to call with the new value delta
-     direction:      keyword indicating direction to listen to (:ew, :we, :ns, :sn)
      transaction-id: an atom holding a fresh transaction ID to use. It will
                      be reset to nil after the transaction is committed.
 
    Returns a WatchEvent that listens for mouse wheel events and applies the deltas
    within a transaction,"
-  [wheel-stream set-delta direction ^atom transaction-id]
+  [direction wheel-stream set-delta ^atom transaction-id]
   (let [debounce-ms (get refs/workspace-layout :input-debounce-ms 800)
         get-dim     (dim-from-direction direction)
-        set-delta*  (fn [event]
+        set-delta   (fn [event]
                       (let [delta (get-dim (mse/get-pointer-position (:event event)))
                             up?   (> delta 0)
                             down? (< delta 0)]
-                        ;; (js/console.log "Numeric input set-delta*"
-                        ;;                 "delta:" delta
-                        ;;                 "up?:" up?
-                        ;;                 "down?:" down?)
                         (set-delta (:react-event event) up? down? true)))]
 
-    (js/console.log "Numeric input start-mouse-wheel-on-input")
+    (js/console.log "Numeric input start-mouse-wheel, direction:" (name direction))
 
     (ptk/reify ::start-mouse-wheel
       ptk/WatchEvent
@@ -161,9 +157,9 @@
           ;; - if the user drags the input while the mouse wheel is active,
 
           (rx/concat
-           (rx/of (dwu/start-undo-transaction transaction-id {:timeout false}))
-           (rx/tap set-delta* wheel-stream)
-           (rx/of (dwu/commit-undo-transaction transaction-id))
+           (rx/of (dwu/start-undo-transaction @transaction-id {:timeout false}))
+           (rx/tap set-delta wheel-stream)
+           (rx/of (dwu/commit-undo-transaction @transaction-id))
            (rx/of (set-effect! transaction-id nil))))))))
 
 (defn on-mouse-wheel* [ref stream set-delta transaction-id]
@@ -192,7 +188,7 @@
              (let [id (js/Symbol)]
                (reset! transaction-id id)
                ;; TODO: do I need to make direction configurable e.g. for users of reverse scrolling?
-               (st/emit! (start-mouse-wheel stream set-delta :ns transaction-id))))))))))
+               (st/emit! (start-mouse-wheel :ns stream set-delta transaction-id))))))))))
 
 (defn- start-dragging
   "Starts dragging on an input element to change its value.
@@ -200,84 +196,123 @@
    Wraps changes in an undo transaction and sets the cursor style.
    
    Args:
-     mouse-stream: a stream of mouse events (e.g., pointermove)
-     set-delta:    function to call with the new value delta
      direction:    keyword indicating direction (:ew, :we, :ns, :sn, :rotate)
-     last-value*:  an atom holding the last value of the input
+     local-stream: a stream of events for the numeric imput component
+     set-delta:    function to call with the new value delta
      transaction-id: an atom holding a fresh transaction ID to use.
                      It will be reset to nil after the transaction is committed.
    
    Returns a WatchEvent that listens for mouse movements and applies the delta."
-  [mouse-stream set-delta direction last-value* ^atom transaction-id]
-  (js/console.log "Numeric input start-dragging-on-input"
-                  "direction:" (name direction))
+  [direction set-delta ^atom transaction-id]
+  (js/console.log "Numeric input start-dragging, direction:" (name direction))
   (let [sensitivity (get refs/workspace-layout :input-drag-sensitivity 1)  ; pixels per step
         get-dim     (dim-from-direction direction)
 
-
-        ;; FIXME: this is 
-        set-delta*
+        set-delta
         (fn [event]
-          (let [diff  (get-dim (mse/get-pointer-position (:event event)))
+          (let [diff  (get-dim (:delta event))
                 up?   (> diff 0)
                 down? (< diff 0)]
             (when (> (abs diff) sensitivity)
-              (set-delta (:react-event event) up? down? true))))
+              (set-delta (:event event) up? down? true))))
 
         make-delta-event
         (fn [[prev curr]]
           (let [prev-pos (dom/get-client-position prev)
                 curr-pos (dom/get-client-position curr)]
-            {:type :delta
-             :react-event curr
-             :event (mse/->PointerEvent :delta (gpt/subtract curr-pos prev-pos)
-                                        (kbd/ctrl? curr)
-                                        (kbd/shift? curr)
-                                        (kbd/alt? curr)
-                                        (kbd/meta? curr))}))]
+            {:event curr
+             :delta (gpt/subtract curr-pos prev-pos)}))]
 
     (ptk/reify ::start-dragging
       ptk/WatchEvent
       (watch [_ _ stream]
         (let [stopper      (mse/drag-stopper stream)
-              delta-stream (->> mouse-stream
+              delta-stream (->> (rx/from-event globals/window "pointermove")
                                 (pairwise)
                                 (rx/take-until stopper)
                                 (rx/map make-delta-event))]
           (rx/concat
            (rx/of (set-drag-cursor direction))
            (rx/of (dwu/start-undo-transaction @transaction-id {:timeout false}))
-           (rx/tap set-delta* delta-stream)
+           (rx/tap set-delta delta-stream)
            (rx/of (dwu/commit-undo-transaction @transaction-id))
            (rx/of (set-drag-cursor nil))
-           (rx/of (set-effect! transaction-id nil))
-           (rx/of (simple-effect #(js/console.log "last-value* before drag: " @last-value*)))))))))
+           (rx/of (set-effect! transaction-id nil))))))))
 
-
-(defn on-drag-start* [stream set-delta drag-direction last-value* ^atom transaction-id]
+(defn on-drag-start* [drag-direction set-delta ^atom transaction-id]
   (mf/use-callback
-   (mf/deps stream drag-direction last-value* transaction-id)
    (fn [^js event]
-     (let [ctrl?      (kbd/ctrl? event)
-           shift?     (kbd/shift? event)
-           alt?       (kbd/alt? event)
-           meta?      (kbd/meta? event)
-           pos        (dom/get-client-position event)]
-       (js/console.log "Numeric input on-drag-start*"
-                       "ctrl?" ctrl? "shift?" shift? "alt?" alt? "meta?" meta?
-                       "pos:" pos
-                       "drag-direction:" (name drag-direction))
-       (dom/prevent-default event)
-       (dom/stop-immediate-propagation event)
-       ;; TODO: do something adequate here...
-       (rx/push! stream {:type :drag
-                         :react-event event
-                         :event (mse/->PointerEvent :drag pos ctrl? shift? alt? meta?)})
-       (when (nil? @transaction-id)
-         (let [id (js/Symbol)]
-           (reset! transaction-id id)
-                      ;; TODO: do I need to make direction configurable e.g. for users of reverse scrolling?
-           (st/emit! (start-dragging stream set-delta drag-direction last-value* transaction-id))))))))
+     (dom/prevent-default event)
+     (dom/stop-immediate-propagation event)
+     (when (nil? @transaction-id)
+       (let [id (js/Symbol)]
+         (reset! transaction-id id)
+         ;; TODO: do I need to make direction configurable e.g. for users of reverse scrolling?
+         (st/emit! (start-dragging drag-direction set-delta transaction-id)))))))
+
+(defn- start-keyboard-action
+  "Starts a keyboard action to change the value of an input.
+
+   Args:
+     stream:       the stream of events for the numeric input component
+     set-delta:    function to call with the new value delta
+     last-value*:  a reference to the last value before any transactional change
+
+   Returns a WatchEvent that listens for keyboard events and applies the deltas."
+  [ref curr-value* last-value* stream set-delta transaction-id]
+  (let [debounce-ms (get refs/workspace-layout :input-debounce-ms 800)
+        set-delta   (fn [e]
+                      (set-delta (:native-event e) (kbd/up-arrow? e) (kbd/down-arrow? e) true))]
+
+    (js/console.log "Numeric input start-keyboard-action")
+
+    (ptk/reify ::start-keyboard-action
+      ptk/WatchEvent
+      (watch [_ _ _]
+        (let [stopper    (rx/merge
+                          (rx/debounce debounce-ms stream)
+                          (from-event (mf/ref-val ref) "blur" #js {:once true}))
+              kbd-stream (rx/take-until stopper stream)]
+          (rx/concat
+           (rx/of (dwu/start-undo-transaction @transaction-id {:timeout false}))
+           (rx/tap set-delta kbd-stream)
+           (rx/of (dwu/commit-undo-transaction @transaction-id))
+           ;; FIXME: for some reason curr-value as updated by set-delta -> appy-value -> on-change -> update-input is not this @curr-value* ??
+           (rx/of (set-effect! last-value* @curr-value*))
+           (rx/of (set-effect! transaction-id nil))))))))
+
+(defn on-key-down* [ref update-input apply-value tab-accepts? curr-value* last-value* stream set-delta transaction-id]
+  (mf/use-fn
+   (fn [^js event]
+     (let [up?     (kbd/up-arrow? event)
+           down?   (kbd/down-arrow? event)
+           esc?    (kbd/esc? event)
+           accept? (or (kbd/enter? event) (and (kbd/tab? event) tab-accepts?))
+           node    (mf/ref-val ref)]
+       (js/console.log "handle-key-down")
+       (cond
+         (or down? up?) (let [kbd-event (kbd/->KeyboardEvent
+                                         (if up? :up :down)
+                                         (.-key event)
+                                         (kbd/shift? event)
+                                         (kbd/ctrl? event)
+                                         (kbd/alt? event)
+                                         (kbd/meta? event)
+                                         (kbd/mod? event)
+                                         (kbd/editing-event? event)
+                                         (.-nativeEvent event))]
+                          (dom/prevent-default event)
+                          (rx/push! stream kbd-event)
+                          (when (nil? @transaction-id)
+                            (let [id (js/Symbol)]
+                              (reset! transaction-id id)
+                              (st/emit! (start-keyboard-action ref curr-value* last-value* stream set-delta transaction-id)))))
+         esc?    (do
+                   (update-input @last-value*)
+                   (dom/blur! node))
+         accept? (do
+                   (apply-value event @curr-value* false)
+                   (reset! last-value* @curr-value*)))))))
 
 (defn parse-value* [ref min-value max-value value nillable? default]
   (mf/use-fn
@@ -407,13 +442,13 @@
         ;; using the mouse wheel.
         transaction-id (mf/use-var nil)
 
-
         local-stream   (mf/use-memo #(rx/subject))  ;; wheel, kbdup/down, drag events
 
         update-input
         (mf/use-fn
          (fn [new-value]
            (when-let [node (mf/ref-val ref)]
+             (js/console.log "Numeric input update-input: " new-value)
              (reset! curr-value* new-value)
              (dom/set-value! node (fmt/format-number new-value)))))
 
@@ -428,55 +463,13 @@
            (update-input new-value)))
 
         parse-value (parse-value* ref min-value max-value value nillable? default)
-        set-delta (set-delta* wrap-value? min-value max-value parse-value apply-value default step-value)
+        set-delta   (set-delta* wrap-value? min-value max-value parse-value
+                                apply-value default step-value)
 
         on-mouse-wheel (on-mouse-wheel* ref local-stream set-delta transaction-id)
-        on-drag-start  (on-drag-start* local-stream set-delta drag-direction last-value* transaction-id)
-
-
-        ;; handle-on-drag
-        ;; (mf/use-fn
-        ;;  (mf/deps ref)
-        ;;  (fn [event]
-        ;;    (when-let [node (mf/ref-val ref)]
-        ;;      (when (identical? (dom/get-target event) node)
-        ;;        (when (dom/left-mouse? event)
-        ;;          (dom/prevent-default event)
-        ;;          (dom/stop-immediate-propagation event)
-        ;;          (mf/set-ref-val! last-value* (parse-value))
-        ;;          (st/emit! (start-dragging set-delta drag-direction last-value*)))))))
-
-        handle-key-down
-        (mf/use-fn
-         (mf/deps set-delta apply-value update-input parse-value tab-accepts?)
-         (fn [^js event]
-           (let [up?     (kbd/up-arrow? event)
-                 down?   (kbd/down-arrow? event)
-                 esc?    (kbd/esc? event)
-                 accept? (or (kbd/enter? event) (and (kbd/tab? event) tab-accepts?))
-                 node    (mf/ref-val ref)]
-             (js/console.log "handle-key-down")
-             (cond
-               (or down? up?) (let [kbd-event (kbd/->KeyboardEvent
-                                               (if up? :up :down)
-                                               (.-key event)
-                                               (kbd/shift? event)
-                                               (kbd/ctrl? event)
-                                               (kbd/alt? event)
-                                               (kbd/meta? event)
-                                               (kbd/mod? event)
-                                               (kbd/editing-event? event)
-                                               (.-nativeEvent event))]
-                                (dom/prevent-default event)
-                                (rx/push! local-stream kbd-event))
-                                ;; (set-delta kbd-event up? down?)
-              ;;  (st/emit! (start-keyboard-action set-delta up? down? last-value*))
-               esc?    (do
-                         (update-input @last-value*)
-                         (dom/blur! node))
-               accept? (do
-                         (apply-value event @curr-value* false)
-                         (reset! last-value* @curr-value*))))))
+        on-drag-start  (on-drag-start* drag-direction set-delta transaction-id)
+        on-key-down    (on-key-down*  ref update-input apply-value tab-accepts? curr-value* last-value*
+                                      local-stream set-delta transaction-id)
 
         ;; TODO: how do I deactivate the default behavior of the input?
         ;; without redefining handle-change? Can I? We don't want to save last-value
@@ -489,19 +482,6 @@
            ;; Store the last value inputed 
            (reset! curr-value* (parse-value))
            (js/console.log "handle-change: last=" @last-value* "curr=" @curr-value*)))
-
-        ;; handle-mouse-wheel
-        ;; (mf/use-fn
-        ;;  (mf/deps set-delta)
-        ;;  (fn [event]
-        ;;    (when-let [node (mf/ref-val ref)]
-        ;;      (js/console.log "handle-mouse-wheel: " @transaction-id)
-        ;;      (when (and (dom/active? node) (not @transaction-id))
-        ;;        (reset! transaction-id (js/Symbol))  ;; HACK testing
-        ;;        (dom/prevent-default event)
-        ;;        (dom/stop-propagation event)
-        ;;        (reset! last-value* (parse-value))
-        ;;        (st/emit! (start-mouse-wheel set-delta :ns node transaction-id))))))
 
         handle-blur
         (mf/use-fn
@@ -526,16 +506,6 @@
            (js/console.log "handle-unmount")
            (handle-blur)
            (rx/end! local-stream)))  ;; Is this needed?
-
-
-        ;; on-click
-        ;; (mf/use-fn
-        ;;  (fn [event]
-        ;;    (let [target (dom/get-target event)
-        ;;          node   (mf/ref-val ref)]
-        ;;      (js/console.log "Numeric input on-click: " target)
-        ;;      (when (and (some? node) (not (dom/child? node target)))
-        ;;        (dom/blur! node)))))
 
         handle-focus
         (mf/use-callback
@@ -562,46 +532,16 @@
                   (obj/set! "ref" ref)
                   (obj/set! "defaultValue" (fmt/format-number value))
                   (obj/set! "title" title)
-                  (obj/set! "onKeyDown" handle-key-down)
+                  (obj/set! "onKeyDown" on-key-down)
                   (obj/set! "onDragStart" on-drag-start)
                   (obj/set! "onBlur" handle-blur)
                   (obj/set! "onFocus" handle-focus))]
-
-    ;; (mf/with-effect [local-stream ref]
-    ;;   (when-let [node (mf/ref-val ref)]
-    ;;     (let [debounce-ms (get refs/workspace-layout :input-debounce-ms 800)
-    ;;           get-dim     (dim-from-direction :ns)  ;; TODO: need to allow reversing for OSX here?
-    ;;           set-delta*  (fn [local-event]
-    ;;                         (let [event (:react-event local-event)
-    ;;                               delta (mse/get-pointer-position (:event local-event))
-    ;;                               delta (get-dim delta)
-    ;;                               up?   (> delta 0)
-    ;;                               down? (< delta 0)]
-    ;;                           (js/console.log "Numeric input set-delta*"
-    ;;                                           "delta:" delta
-    ;;                                           "up?:" up?
-    ;;                                           "down?:" down?)
-    ;;                           (set-delta event up? down? true)))
-    ;;           wheel-stream (rx/filter #(= :wheel (:type %)) local-stream)
-    ;;           stopper      (rx/merge
-    ;;                         (rx/debounce debounce-ms wheel-stream)
-    ;;                         (mse/drag-stopper local-stream {:blur? false :up-mouse? false}))
-    ;;           undo-id     (js/Symbol)]
-    ;;       (rx/sub! (->> wheel-stream
-    ;;                     (rx/take-until stopper)
-    ;;                     (rx/tap #(dom/select-text! node)))
-    ;;                set-delta*))))
 
     (mf/with-effect [value]
       (when-let [input-node (mf/ref-val ref)]
         (dom/set-value! input-node (fmt/format-number value))))
 
     (mf/with-effect [handle-unmount] handle-unmount)
-
-    ;; (mf/with-layout-effect []
-    ;;   (let [keys [(events/listen globals/window "pointerdown" on-click)
-    ;;               (events/listen globals/window "click" on-click)]]
-    ;;     #(run! events/unlistenByKey keys)))
 
     (mf/with-effect []
       (when-let [node (mf/ref-val ref)]
