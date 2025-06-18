@@ -257,10 +257,10 @@
                        (udw/increase-rotation ids value {}
                                               {:undo-transaction? (not in-transaction?)})))))
 
-        on-width-change #(on-size-change % :width)
-        on-height-change #(on-size-change % :height)
-        on-pos-x-change #(on-position-change % :x)
-        on-pos-y-change #(on-position-change % :y)
+        on-width-change #(on-size-change %1 :width %3)
+        on-height-change #(on-size-change %1 :height %3)
+        on-pos-x-change #(on-position-change %1 :x %3)
+        on-pos-y-change #(on-position-change %1 :y %3)
 
         ;; CLIP CONTENT AND SHOW IN VIEWER
         on-change-clip-content
@@ -363,7 +363,7 @@
                              :no-validate true
                              :placeholder (if (= :multiple (:height values)) (tr "settings.multiple") "--")
                              :on-change on-height-change
-                             :drag-direction "ns"
+                             :drag-direction "sn"
                              :disabled disabled-height-sizing?
                              :class (stl/css :numeric-input)
                              :value (:height values)}]]
@@ -396,7 +396,7 @@
                              :placeholder (if (= :multiple (:y values)) (tr "settings.multiple") "--")
                              :disabled disabled-position-y?
                              :on-change on-pos-y-change
-                             :drag-direction "ew"
+                             :drag-direction "ns"
                              :class (stl/css :numeric-input)
                              :value (:y values)}]]])
      (when (or (options :rotation) (options :radius))
