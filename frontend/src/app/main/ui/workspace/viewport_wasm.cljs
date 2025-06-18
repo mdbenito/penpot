@@ -99,6 +99,9 @@
         wasm-modifiers    (mf/deref workspace-wasm-modifiers)
 
         workspace-editor-state (mf/deref refs/workspace-editor-state)
+        ;; HACK: we need a better way to disable the custom cursor while dragging
+        ;; in numeric-input*
+        disable-cursor?   (mf/deref refs/disable-viewport-cursor)
 
         file-id           (get file :id)
         objects           (get page :objects)
@@ -160,7 +163,6 @@
         zoom              (d/check-num zoom 1)
         drawing-tool      (:tool drawing)
         drawing-obj       (:object drawing)
-
 
         selected-frames   (into #{} (map :frame-id) selected-shapes)
 
@@ -342,7 +344,8 @@
 
     (hooks/setup-dom-events zoom disable-paste in-viewport? read-only? drawing-tool drawing-path?)
     (hooks/setup-viewport-size vport viewport-ref)
-    (hooks/setup-cursor cursor alt? mod? space? panning drawing-tool drawing-path? node-editing? z? read-only?)
+    (hooks/setup-cursor cursor alt? mod? space? panning drawing-tool drawing-path? node-editing?
+                        z? read-only? disable-cursor?)
     (hooks/setup-keyboard alt? mod? space? z? shift?)
     (hooks/setup-hover-shapes page-id move-stream base-objects transform selected mod? hover measure-hover
                               hover-ids hover-top-frame-id @hover-disabled? focus zoom show-measures?)

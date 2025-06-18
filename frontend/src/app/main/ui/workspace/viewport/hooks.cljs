@@ -85,9 +85,9 @@
       (when (not= size vport)
         (st/emit! (dw/initialize-viewport (dom/get-client-size prnt)))))))
 
-(defn setup-cursor [cursor alt? mod? space? panning drawing-tool drawing-path? path-editing? z? workspace-read-only?]
+(defn setup-cursor [cursor alt? mod? space? panning drawing-tool drawing-path? path-editing? z? workspace-read-only? disable-cursor?]
   (mf/use-effect
-   (mf/deps @cursor @alt? @mod? @space? panning drawing-tool drawing-path? path-editing? z? workspace-read-only?)
+   (mf/deps @cursor @alt? @mod? @space? panning drawing-tool drawing-path? path-editing? z? workspace-read-only? disable-cursor?)
    (fn []
      (let [show-pen? (or (= drawing-tool :path)
                          (and drawing-path?
@@ -100,6 +100,7 @@
 
            new-cursor
            (cond
+             disable-cursor?                ""  ; HACK: remove me ASAP
              (and @mod? @space?)             (utils/get-cursor :zoom)
              (or panning @space?)            (utils/get-cursor :hand)
              (= drawing-tool :comments)      (utils/get-cursor :comments)
