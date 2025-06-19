@@ -53,6 +53,10 @@
     [potok.v2.core :as ptk]
     [rumext.v2 :as mf]))
 
+(def ^:private ^:const default-input-debounce-ms 800)
+(def ^:private ^:const default-input-large-step 10)
+(def ^:private ^:const default-input-small-step 0.1)
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; TODO: Remove once the two PRs in beicon are merged
 
@@ -114,11 +118,6 @@
      direction - (optional) keyword indicating direction (:ew, :ns, :rotate)"
   [direction]
   (ptk/reify ::set-drag-cursor
-    ptk/UpdateEvent
-    (update [_ state]
-      (assoc-in state [:workspace-local :disable-viewport-cursor?]
-                (not (nil? direction))))
-
     ptk/EffectEvent
     (effect [_ _ _]
       (let [body (.-body globals/document)
@@ -179,7 +178,7 @@
                             down? (< delta 0)]
                         (set-delta (:react-event event) up? down? true)))]
 
-    (ptk/reify ::start-mouse-wheel
+    (ptk/reify ::start-input-wheel
       ptk/WatchEvent
       (watch [_ _ stream]
         (let [stopper      (rx/merge
@@ -194,7 +193,7 @@
            (rx/of (effect-reset! transaction-id nil))))))))
 
 (defn on-mouse-wheel* [ref local-stream set-delta transaction-id]
-  (mf/use-callback
+  (mf/use-fn
    (mf/deps ref local-stream set-delta transaction-id)
    (fn [^js event]
      (when-let [node (mf/ref-val ref)]
@@ -278,7 +277,7 @@
            (rx/of (effect-reset! transaction-id nil))))))))
 
 (defn on-drag-start* [ref drag-direction local-stream set-delta ^atom transaction-id]
-  (mf/use-callback
+  (mf/use-fn
    (mf/deps ref drag-direction local-stream set-delta transaction-id)
    (fn [^js event]
      (when-let [node (mf/ref-val ref)]
@@ -307,7 +306,7 @@
 
    Returns a WatchEvent that listens for keyboard events and applies the deltas."
   [ref curr-value* last-value* local-stream set-delta transaction-id]
-  (let [debounce-ms (get refs/workspace-layout :input-debounce-ms 800)
+  (let [debounce-ms (get refs/workspace-layout :input-debounce-ms default-input-debounce-ms)
         set-delta    (fn [^js ev]
                        (let [up?   (or (kbd/up-arrow? ev) (kbd/page-up? ev))
                              down? (or (kbd/down-arrow? ev) (kbd/page-down? ev))]
@@ -349,7 +348,7 @@
      transaction-id: an atom holding a fresh transaction ID to use.
                      It will be reset to nil after the transaction is committed."
   [ref apply-value tab-accepts? curr-value* last-value* local-stream set-delta transaction-id]
-  (mf/use-callback
+  (mf/use-fn
    (mf/deps ref apply-value tab-accepts? curr-value* last-value* local-stream set-delta transaction-id)
    (fn [^js event]
      (let [up?     (or (kbd/up-arrow? event) (kbd/page-up? event))
@@ -379,27 +378,30 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Value handling
 
-(defn parse-value* [ref min-value max-value value nillable? default]
+(defn- parse-value*
   "Parses the value from the input element, applying min and max constraints,
    and returning a default value if the input is nillable or invalid.
 
+   This also evaluates simple math expressions in the input value.
+
    Args:
-     ref:         a reference to the input DOM element
-     min-value:   minimum allowed value
-     max-value:   maximum allowed value
-     value:       the current value to parse
-     nillable?:   whether the input can be nillable
-     default:     default value to return if parsing fails or is nillable
+     ref:       a reference to the input DOM element
+     min-value: minimum allowed value
+     max-value: maximum allowed value
+     initial:   the initial value of the input
+     nillable?: whether the input can be nillable
+     default:   default value to return if parsing fails or is nillable
 
    Returns:
      A number within the specified range, or the default value if parsing fails."
+  [ref min-value max-value initial nillable? default]
   (mf/use-fn
-   (mf/deps min-value max-value value nillable? default)
+   (mf/deps min-value max-value initial nillable? default)
    (fn []
      (when-let [node (mf/ref-val ref)]
        (let [new-value (-> (dom/get-value node)
                            (str/strip-suffix ".")
-                           (smt/expr-eval value))]
+                           (smt/expr-eval initial))]
          (cond
            (d/num? new-value)
            (-> new-value
@@ -413,10 +415,34 @@
            nillable?
            default
 
-           :else value))))))
+           :else initial))))))
 
-(defn set-delta* [wrap-value? min-value max-value parse-value apply-value default step-value]
-  "Increases the value of the numeric input by a delta based on keyboard or mouse events.
+(defn- apply-value*
+  "Returns a callback that applies the new value to the input element,
+   updating the DOM and triggering the on-change callback if provided.
+
+   Args:
+     on-change:      a function to call when the value changes
+     update-input:   a function to update the input value in the DOM
+     initial-value:  the initial value of the input
+     last-value*:    a reference to the last value before any transactional change
+   "
+  [on-change update-input initial-value last-value*]
+  (mf/use-fn
+   (mf/deps on-change update-input initial-value last-value*)
+   (fn [^js event new-value ^boolean transaction?]
+     (when (and (not= new-value (or @last-value* initial-value))
+                (fn? on-change))
+       ;; FIXME: on-change very slow, makes the handler laggy
+       (on-change new-value event transaction?))
+     (update-input new-value))))
+
+(defn- apply-delta*
+  "Returns a callback that increases the value of the numeric input by
+   a delta, with increment depending on keyboard modifiers.
+
+   Shift increases the value by a large step, Alt increases the value by
+   a small step.
 
    Args:
      wrap-value?:  whether to wrap around the value when exceeding min/max
@@ -428,50 +454,42 @@
      step-value:   step increment for value changes
 
    Returns a function that handles up/down events and applies the new value."
+  [wrap-value? min-value max-value parse-value apply-value default step-value]
   (mf/use-fn
    (mf/deps wrap-value? min-value max-value parse-value apply-value
             default step-value)
    (fn [^js event ^boolean up? ^boolean down? ^boolean transaction?]
      (let [current-value (parse-value)
-           current-value
-           (cond
-             (and (not current-value) down? max-value)
-             max-value
+           current-value (or current-value
+                             (cond (and down? (d/num? max-value)) max-value
+                                   (and up? (d/num? min-value)) min-value
+                                   :else (d/nilv default 0)))
 
-             (and (not current-value) up? min-value)
-             min-value
+           big-step   (get refs/workspace-layout :input-large-step default-input-large-step)
+           small-step (get refs/workspace-layout :input-small-step default-input-small-step)
+           increment  (cond (kbd/shift? event) big-step
+                            (kbd/alt? event) small-step
+                            :else 1)
+           increment  (* increment (if up? step-value (- step-value)))
 
-             (not current-value)
-             (d/nilv default 0)
+           new-value (+ current-value increment)
+           new-value (cond
+                       (and wrap-value? (d/num? max-value min-value)
+                            (> new-value max-value) up?)
+                       (-> new-value (- max-value) (+ min-value) (- step-value))
 
-             :else
-             current-value)]
-       (when current-value
-         (let [big-step   (get refs/workspace-layout :input-big-increment 10)
-               small-step (get refs/workspace-layout :input-small-increment 0.1)
-               increment  (cond (kbd/shift? event) big-step
-                                (kbd/alt? event) small-step
-                                :else 1)
-               increment  (* increment (if up? step-value (- step-value)))
+                       (and wrap-value? (d/num? max-value min-value)
+                            (< new-value min-value) down?)
+                       (-> new-value (- min-value) (+ max-value) (+ step-value))
 
-               new-value (+ current-value increment)
-               new-value (cond
-                           (and wrap-value? (d/num? max-value min-value)
-                                (> new-value max-value) up?)
-                           (-> new-value (- max-value) (+ min-value) (- step-value))
+                       (and (d/num? min-value) (< new-value min-value))
+                       min-value
 
-                           (and wrap-value? (d/num? max-value min-value)
-                                (< new-value min-value) down?)
-                           (-> new-value (- min-value) (+ max-value) (+ step-value))
+                       (and (d/num? max-value) (> new-value max-value))
+                       max-value
 
-                           (and (d/num? min-value) (< new-value min-value))
-                           min-value
-
-                           (and (d/num? max-value) (> new-value max-value))
-                           max-value
-
-                           :else new-value)]
-           (apply-value event new-value transaction?)))))))
+                       :else new-value)]
+       (apply-value event new-value transaction?)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Component
@@ -501,7 +519,8 @@
         class        (d/nilv (unchecked-get props "className") "")
         ;; Whether the tab key should be used to accept the input value before
         ;; moving to the next input.
-        tab-accepts? (d/nilv (unchecked-get props "tabAccepts") true)
+        ;;(d/nilv (unchecked-get props "tabAccepts") true)
+        tab-accepts? true
 
         min-value    (d/parse-double min-value)
         max-value    (d/parse-double max-value)
@@ -516,16 +535,16 @@
         local-ref   (mf/use-ref)
         ref         (or external-ref local-ref)
 
-        ;; This `value` represents the previous value and is used as
+        ;; This represents the previous value and is used as
         ;; initial value for simple math expression evaluation.
-        value       (when (not= :multiple value-str) (d/parse-double value-str default))
+        initial-value (when (not= :multiple value-str) (d/parse-double value-str default))
 
         ;; Last value before any transactional change
-        last-value* (mf/use-var value)
+        last-value* (mf/use-var initial-value)
 
         ;; Current value of the input, updated on-change, used to apply
         ;; unapplied changes upon unmount / blur
-        curr-value* (mf/use-var value)
+        curr-value* (mf/use-var initial-value)
 
         ;; Transactions are created when the user drags, uses keyboard arrows or
         ;; mouse wheel to change the value of the input.
@@ -542,24 +561,15 @@
              (reset! curr-value* new-value)
              (dom/set-value! node (fmt/format-number new-value)))))
 
-        apply-value
-        (mf/use-fn
-         (mf/deps on-change update-input value)
-         (fn [^js event new-value ^boolean transaction?]
-           (when (and (not= new-value value)
-                      (fn? on-change))
-             ;; FIXME: on-change very slow, makes the handler laggy
-             (on-change new-value event transaction?))
-           (update-input new-value)))
+        parse-value (parse-value* ref min-value max-value initial-value nillable? default)
+        apply-value (apply-value* on-change update-input initial-value last-value*)
+        apply-delta (apply-delta* wrap-value? min-value max-value parse-value
+                                  apply-value default step-value)
 
-        parse-value (parse-value* ref min-value max-value value nillable? default)
-        set-delta   (set-delta* wrap-value? min-value max-value parse-value
-                                apply-value default step-value)
-
-        on-mouse-wheel (on-mouse-wheel* ref local-stream set-delta transaction-id)
-        on-drag-start  (on-drag-start* ref drag-direction local-stream set-delta transaction-id)
+        on-mouse-wheel (on-mouse-wheel* ref local-stream apply-delta transaction-id)
+        on-drag-start  (on-drag-start* ref drag-direction local-stream apply-delta transaction-id)
         on-key-down    (on-key-down*  ref apply-value tab-accepts? curr-value* last-value*
-                                      local-stream set-delta transaction-id)
+                                      local-stream apply-delta transaction-id)
 
         handle-change
         (mf/use-fn
@@ -568,32 +578,27 @@
 
         handle-blur
         (mf/use-fn
-         (mf/deps parse-value apply-value update-input on-blur)
+         (mf/deps apply-value on-blur)
          (fn [event]
-           (let [new-value @curr-value*
-                 old-value (or @last-value* default)]
-             (when (not= new-value old-value)
-               (if (or nillable? new-value)
-                 (apply-value event new-value)
-                 (update-input new-value))))
+           (apply-value event @curr-value*)
            (when (fn? on-blur)
              (on-blur event))))
 
         handle-unmount
-        (mf/use-callback
+        (mf/use-fn
          (mf/deps local-stream)
          (fn []
-           (handle-blur)
            (st/emit! (set-drag-cursor nil))
-           (rx/end! local-stream)))  ;; FIXME: Is this needed?
+           (rx/end! local-stream) ;; FIXME: Is this needed?
+           (handle-blur)))
 
         handle-focus
-        (mf/use-callback
+        (mf/use-fn
          (mf/deps on-focus select-on-focus?)
          (fn [event]
            (reset! last-value* (parse-value))
            (let [target (dom/get-target event)]
-             (when on-focus
+             (when (fn? on-focus)
                (on-focus event))
 
              (when select-on-focus?
@@ -610,16 +615,16 @@
                   (obj/set! "className" (str/join " " [class (cursor-from-direction drag-direction)]))
                   (obj/set! "type" "text")
                   (obj/set! "ref" ref)
-                  (obj/set! "defaultValue" (fmt/format-number value))
+                  (obj/set! "defaultValue" (fmt/format-number initial-value))
                   (obj/set! "title" title)
                   (obj/set! "onKeyDown" on-key-down)
                   (obj/set! "onDragStart" on-drag-start)
                   (obj/set! "onBlur" handle-blur)
                   (obj/set! "onFocus" handle-focus))]
 
-    (mf/with-effect [value]
+    (mf/with-effect [initial-value]
       (when-let [input-node (mf/ref-val ref)]
-        (dom/set-value! input-node (fmt/format-number value))))
+        (dom/set-value! input-node (fmt/format-number initial-value))))
 
     (mf/with-effect [handle-unmount] handle-unmount)
 
