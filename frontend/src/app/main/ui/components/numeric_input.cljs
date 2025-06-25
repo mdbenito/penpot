@@ -40,6 +40,7 @@
     [app.main.store :as st]
     [app.main.ui.css-cursors :as cur]
     [app.main.ui.formats :as fmt]
+    [app.main.ui.hooks :as h]
     [app.util.dom :as dom]
     [app.util.dom.normalize-wheel :as nw]
     [app.util.globals :as globals]
@@ -302,22 +303,24 @@
 
         start-s
         (->> (from-event node "dragstart" #js {:passive false})
-                      ;; (rx/tap #(js/console.log "drag-stream: dragstart" %))
+            ;;  (rx/tap #(js/console.log "drag-stream: START with event type" (.-type ^js %)))
              (rx/tap dom/prevent-default)
              (rx/tap dom/stop-propagation)
              (rx/share))
         end-s
-        (rx/share
-         (rx/merge
-          (->> (rx/merge
-                (from-event node "dragend")
-                (from-event globals/window "pointerup")
-                (->> (from-event node "keydown")
-                     (rx/filter kbd/esc?)))
-               (rx/tap #(js/console.log "drag-stream: event type" (.-type ^js %)))
-               (rx/tap dom/prevent-default)
-               (rx/tap dom/stop-immediate-propagation))
-          (mse/drag-stopper st/stream)))
+        (->> (rx/merge
+              (mse/drag-stopper st/stream)
+              (->> (rx/merge
+                    (from-event node "dragend")
+                    (from-event globals/window "pointerup")
+                    (->> (from-event node "keydown")
+                         (rx/filter kbd/esc?)))
+                   (rx/tap dom/prevent-default)
+                   (rx/tap dom/stop-immediate-propagation)
+                   (rx/tap #(set-drag-cursor nil))
+                   (rx/tap #(dom/select-text! node))))
+            ;;  (rx/tap #(js/console.log "drag-stream: END with event type" (.-type ^js %)))
+             (rx/share))
 
         ;; Builds the inner stream that emits drag events
         make-drag-s
@@ -327,25 +330,23 @@
                              (rx/share))
                 begin   (->> move-s
                              (rx/first)
-                              ;; (rx/tap #(js/console.log "drag-stream: pointermove" %))
                              (rx/map make-change)
                              (rx/tap #(set-drag-cursor direction)))
                 updates (->> move-s
                              (rx/map make-change))
                 end     (->> end-s
-                             (rx/first)
-                             (rx/tap #(set-drag-cursor nil))
-                             (rx/tap #(dom/select-text! node)))]
+                             (rx/map (fn [^js e] [nil e])))]
 
             (rx/concat
              (->> (rx/merge begin updates)
+                  (rx/filter #(dm/nnil? (first %)))
                   (rx/take-until end-s))
              end)))]
     (exhaust-map make-drag-s start-s)))
 
 (defn- keyboard-stream
   ""
-  [node compute-delta initial-value* parse-value]
+  [node compute-delta parse-value]
   (let [up?      #(or (kbd/up-arrow? %) (kbd/page-up? %))
         down?    #(or (kbd/down-arrow? %) (kbd/page-down? %))
         is-step? #(or (up? %) (down? %))
@@ -367,9 +368,12 @@
 
         cancel-s (->> event-s
                       (rx/filter cancel?)
-                      ; This should both push the change and leave focus
-                      ; triggering a transaction commit in transactional-input*
-                      (rx/map (fn [e] [@initial-value* e])))]
+                      ; FIXME: mimicking current behavior means that ESC accepts
+                      ; the current value, which is IMHO unexpected.
+                      ; Instead we could do something like:
+                      ; (rx/map (fn [e] [@initial-value* e]))
+                      (rx/map (fn [e] [(parse-value) e]))
+                      (rx/tap #(dom/blur! node)))]
 
     (rx/merge step-s accept-s cancel-s)))
 
@@ -432,8 +436,8 @@
         local-ref   (mf/use-ref)
         ref         (or external-ref local-ref)
 
-        ;; This represents the previous value and is used as
-        ;; initial value for simple math expression evaluation.
+        ;; This is used as initial value for simple math expression
+        ;; evaluation. FIXME: this is not really working as it should
         initial-value* (mf/use-var (when (not= :multiple value-str)
                                      (d/parse-double value-str default)))
 
@@ -461,32 +465,32 @@
         ;; e.g. number input, paste, etc.
         handle-change
         (mf/use-fn
-         (mf/deps parse-value)
-         (fn [^js event]
+         (mf/deps parse-value curr-value*)
+         (fn [^js _event]
            (when-let [new-value (parse-value)]
-             (js/console.log "handle-change called with "
-                             "curr-value*:" @curr-value*
-                             "new-value:" new-value
-                             "event:" (if event (.-type event) "nil"))
+            ;;  (js/console.log "handle-change called with "
+            ;;                  "curr-value*:" @curr-value*
+            ;;                  "new-value:" new-value
+            ;;                  "event:" (if event (.-type event) "nil"))
              (reset! curr-value* new-value))))
 
         ;; Called on changes induced by drag, wheel, keyboard up/down
         on-change'
         (mf/use-fn
-         (mf/deps parse-value)
+         (mf/deps parse-value curr-value*)
          (fn [new-value ^js event]
            (when new-value
              (reset! curr-value* new-value)
-             (js/console.log "on-change' called with parse-value:" (parse-value)
-                             "curr-value*:" @curr-value*
-                             "event:" (if event (.-type event) "nil"))
+            ;;  (js/console.log "on-change' called with parse-value:" (parse-value)
+            ;;                  "curr-value*:" @curr-value*
+            ;;                  "event:" (if event (.-type event) "nil"))
              (when-let [node (mf/ref-val ref)]
                (dom/set-value! node (fmt/format-number new-value)))
              (on-change new-value event))))
 
         on-unmount
         (mf/use-fn
-         (mf/deps unmount-s ref curr-value*)
+         (mf/deps unmount-s ref curr-value* initial-value*)
          (fn [^js event]
            (st/emit! (set-drag-cursor nil))
            (when (not= @curr-value* @initial-value*)
@@ -506,10 +510,10 @@
 
         on-focus'
         (mf/use-fn
-         (mf/deps ref on-focus select-on-focus? on-change parse-value)
+         (mf/deps ref on-focus select-on-focus? on-change parse-value
+                  initial-value* curr-value* default)
          (fn [event]
-           (reset! curr-value* (parse-value))
-           (reset! initial-value* @curr-value*)
+           (reset! curr-value* (or (parse-value) default))
            (when (fn? on-focus)
              (on-focus event))
 
@@ -521,12 +525,14 @@
                                (from-event input-node "blur" #js {:passive false :once true}))
                    wheel-s    (wheel-stream input-node compute-delta)
                    drag-s     (drag-stream input-node compute-delta drag-direction)
-                   keyboard-s (keyboard-stream input-node compute-delta initial-value* parse-value)
+                   keyboard-s (keyboard-stream input-node compute-delta parse-value)
                    change-s'  (->> (rx/merge wheel-s drag-s keyboard-s)
                                    (rx/take-until stopper))]
-               (rx/sub! change-s' {:next (partial rx/push! change-s)
-                                   :error (fn [e] (js/console.error "Error in change stream:" e))
-                                   :complete #(js/console.log "Change stream completed")})))
+               (rx/sub! change-s' (partial rx/push! change-s)
+                        ;; {:next (partial rx/push! change-s)
+                        ;;            :error (fn [e] (js/console.error "Error in change stream:" e))
+                        ;;            :complete #(js/console.log "Change stream completed")}) 
+                        )))
 
            (when select-on-focus?
              (let [target (dom/get-target event)]
@@ -548,20 +554,15 @@
                   (obj/set! "onBlur" on-blur')
                   (obj/set! "onFocus" on-focus'))]
 
-    (mf/with-effect [on-unmount ref]
+    (mf/with-effect [initial-value* on-unmount ref]
       (when-let [input-node (mf/ref-val ref)]
         (dom/set-value! input-node (fmt/format-number @initial-value*)))
       #(on-unmount #js {:type "unmount"}))
 
     (mf/with-effect [change-s on-change']  ;
-      (js/console.log "Subscribing to change stream")
-      (let [subs [(rx/sub! change-s
-                           (fn [[value ^js event]]
-                             (js/console.log "change-s value:" value
-                                             "event:" (if event (.-type event) "nil"))))
-                  (rx/sub! change-s (partial apply on-change'))]]
-        #(doseq [s subs]
-           (rx/dispose! s))))
+      ;; (js/console.log "Subscribing to change stream")
+      (let [sub (rx/sub! change-s (partial apply on-change'))]
+        #(rx/dispose! sub)))
 
     [:> :input props]))
 
@@ -574,15 +575,12 @@
    [:label {:optional true} :string]
    [:class {:optional true} :string]])
 
-;; FIXME: change this to uuid/next or js.Symbol
-(defonce counter (atom 0))
-
 (mf/defc transactional-input*
   "A component that wraps a numeric input allowing for transactional changes."
   {::mf/forward-ref true}
   ;;  ::mf/schema schema:transactional-input
 
-  [{:keys [on-change on-blur] :rest props} ref]
+  [{:keys [on-change on-blur] :rest props} _ref]
   (let [debounce-ms    (get refs/workspace-layout :input-debounce-ms default-input-debounce-ms)
         transaction-id (mf/use-var nil)
         local-value*   (mf/use-var nil) ;; Holds the current value of the input
@@ -596,7 +594,7 @@
              (js/clearTimeout @timer))
            (reset! timer nil)
            (when @transaction-id
-             (js/console.log "Committing transaction" (subs (str @transaction-id) 0 6))
+            ;;  (js/console.log "Committing transaction" (subs (str @transaction-id) 0 6))
              (st/emit! (dwu/commit-undo-transaction @transaction-id))
              (reset! transaction-id nil))))
 
@@ -608,26 +606,26 @@
         (mf/use-fn
          (mf/deps on-change transaction-id timer local-value*)
          (fn [value ^js event]
-           (js/console.log "on-change wrapper -- "
-                           "value:" value
-                           "local value:" @local-value*
-                           "event:" (if event (.-type event) "nil")
-                           "transaction-id:" (subs (str @transaction-id) 0 6)
-                           "timer:" @timer)
+          ;;  (js/console.log "on-change wrapper -- "
+          ;;                  "value:" value
+          ;;                  "local value:" @local-value*
+          ;;                  "event:" (if event (.-type event) "nil")
+          ;;                  "transaction-id:" (subs (str @transaction-id) 0 6)
+          ;;                  "timer:" @timer)
 
            (when (and value (not= @local-value* value))
              (when @timer
                (js/clearTimeout @timer))
-             (js/console.log "Setting new timer for commit")
+            ;;  (js/console.log "Setting new timer for commit")
              (reset! timer (js/setTimeout commit debounce-ms))
 
              (reset! local-value* value)
              (when (nil? @transaction-id)
                (reset! transaction-id (uuid/next))
-               (js/console.log "Starting new transaction" (subs (str @transaction-id) 0 6))
+              ;;  (js/console.log "Starting new transaction" (subs (str @transaction-id) 0 6))
                (st/emit! (dwu/start-undo-transaction @transaction-id {:timeout 0})))
 
-             (js/console.log "Updating value in transaction" (subs (str @transaction-id) 0 6))
+            ;;  (js/console.log "Updating value in transaction" (subs (str @transaction-id) 0 6))
              (on-change value event true))))
 
         ;; Blur events always commit the current transaction.
@@ -635,15 +633,17 @@
         (mf/use-fn
          (mf/deps on-blur on-change')
          (fn [^js event]
-           (js/console.log "on-blur wrapper -- event:" (if event (.-type event) "nil"))
+          ;;  (js/console.log "on-blur wrapper -- event:" (if event (.-type event) "nil"))
            (commit)
            (when (fn? on-blur)
              (on-blur event))))
 
+        on-unmount (h/use-ref-callback commit)
+
         props (mf/spread-props props {:on-change on-change' :on-blur on-blur'})]
 
     ;; Always commit on unmount
-    (mf/with-effect [commit] commit)
+    (mf/with-effect [on-unmount] on-unmount)
 
     [:> numeric-input* props]))
 
