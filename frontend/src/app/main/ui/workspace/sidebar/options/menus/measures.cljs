@@ -13,7 +13,7 @@
    [app.common.types.shape :as cts]
    [app.common.types.shape.layout :as ctl]
    [app.main.constants :refer [size-presets]]
-   [app.main.data.workspace :as udw]
+   [app.main.data.workspace :as dw]
    [app.main.data.workspace.interactions :as dwi]
    [app.main.data.workspace.shapes :as dwsh]
    [app.main.data.workspace.transforms :as dwt]
@@ -21,7 +21,7 @@
    [app.main.refs :as refs]
    [app.main.store :as st]
    [app.main.ui.components.dropdown :refer [dropdown]]
-   [app.main.ui.components.numeric-input :refer [numeric-input*]]
+   [app.main.ui.components.numeric-input :refer [numeric-input* transactional-input*]]
    [app.main.ui.components.radio-buttons :refer [radio-button radio-buttons]]
    [app.main.ui.ds.buttons.icon-button :refer [icon-button*]]
    [app.main.ui.ds.foundations.assets.icon :as ds-i]
@@ -196,8 +196,8 @@
                  height (-> (dom/get-current-target event)
                             (dom/get-data "height")
                             (d/read-string))]
-             (st/emit! (udw/update-dimensions ids :width width)
-                       (udw/update-dimensions ids :height height)))))
+             (st/emit! (dw/update-dimensions ids :width width)
+                       (dw/update-dimensions ids :height height)))))
 
         ;; ORIENTATION
 
@@ -211,7 +211,7 @@
         (mf/use-fn
          (mf/deps ids)
          (fn [orientation]
-           (st/emit! (udw/change-orientation ids (keyword orientation)))))
+           (st/emit! (dw/change-orientation ids (keyword orientation)))))
 
         ;; SIZE AND PROPORTION LOCK
 
@@ -220,29 +220,29 @@
          (mf/deps ids)
          (fn [value attr in-transaction?]
            (binding [cts/*wasm-sync* true]
-             (st/emit! (udw/trigger-bounding-box-cloaking ids)
-                       (udw/update-dimensions ids attr value
-                                              {:undo-transaction? (not in-transaction?)})))))
+             (st/emit! (dw/trigger-bounding-box-cloaking ids)
+                       (dw/update-dimensions ids attr value
+                                             {:undo-transaction? (not in-transaction?)})))))
 
         on-proportion-lock-change
         (mf/use-fn
          (mf/deps ids proportion-lock)
          (fn [_]
            (let [new-lock (if (= proportion-lock :multiple) true (not proportion-lock))]
-             (run! #(st/emit! (udw/set-shape-proportion-lock % new-lock)) ids))))
+             (run! #(st/emit! (dw/set-shape-proportion-lock % new-lock)) ids))))
 
         ;; POSITION
         do-position-change
         (mf/use-fn
          (fn [shape' value attr in-transaction?]
-           (st/emit! (udw/update-position (:id shape') {attr value}
-                                          {:undo-transaction? (not in-transaction?)}))))
+           (st/emit! (dw/update-position (:id shape') {attr value}
+                                         {:undo-transaction? (not in-transaction?)}))))
 
         on-position-change
         (mf/use-fn
          (mf/deps ids)
          (fn [value attr in-transaction?]
-           (st/emit! (udw/trigger-bounding-box-cloaking ids))
+           (st/emit! (dw/trigger-bounding-box-cloaking ids))
            (binding [cts/*wasm-sync* true]
              (run! #(do-position-change %1 value attr in-transaction?) shapes))))
 
@@ -253,9 +253,9 @@
          (mf/deps ids)
          (fn [value _ ^boolean in-transaction?]
            (binding [cts/*wasm-sync* true]
-             (st/emit! (udw/trigger-bounding-box-cloaking ids)
-                       (udw/increase-rotation ids value {}
-                                              {:undo-transaction? (not in-transaction?)})))))
+             (st/emit! (dw/trigger-bounding-box-cloaking ids)
+                       (dw/increase-rotation ids value {}
+                                             {:undo-transaction? (not in-transaction?)})))))
 
         on-width-change #(on-size-change %1 :width %3)
         on-height-change #(on-size-change %1 :height %3)
@@ -347,26 +347,26 @@
                                     :disabled disabled-width-sizing?)
                :title (tr "workspace.options.width")}
          [:span {:class (stl/css :icon-text)} "W"]
-         [:> numeric-input* {:min 0.01
-                             :no-validate true
-                             :placeholder (if (= :multiple (:width values)) (tr "settings.multiple") "--")
-                             :on-change on-width-change
-                             :disabled disabled-width-sizing?
-                             :drag-direction "ew"
-                             :class (stl/css :numeric-input)
-                             :value (:width values)}]]
+         [:> transactional-input* {:min 0.01
+                                   :no-validate true
+                                   :placeholder (if (= :multiple (:width values)) (tr "settings.multiple") "--")
+                                   :on-change on-width-change
+                                   :disabled disabled-width-sizing?
+                                   :drag-direction "ew"
+                                   :class (stl/css :numeric-input)
+                                   :value (:width values)}]]
         [:div {:class (stl/css-case :height true
                                     :disabled disabled-height-sizing?)
                :title (tr "workspace.options.height")}
          [:span {:class (stl/css :icon-text)} "H"]
-         [:> numeric-input* {:min 0.01
-                             :no-validate true
-                             :placeholder (if (= :multiple (:height values)) (tr "settings.multiple") "--")
-                             :on-change on-height-change
-                             :drag-direction "sn"
-                             :disabled disabled-height-sizing?
-                             :class (stl/css :numeric-input)
-                             :value (:height values)}]]
+         [:> transactional-input* {:min 0.01
+                                   :no-validate true
+                                   :placeholder (if (= :multiple (:height values)) (tr "settings.multiple") "--")
+                                   :on-change on-height-change
+                                   :drag-direction "sn"
+                                   :disabled disabled-height-sizing?
+                                   :class (stl/css :numeric-input)
+                                   :value (:height values)}]]
 
         [:> icon-button* {:variant "ghost"
                           :icon (if proportion-lock "lock" "unlock")
@@ -380,32 +380,32 @@
                                     :disabled disabled-position-x?)
                :title (tr "workspace.options.x")}
          [:span {:class (stl/css :icon-text)} "X"]
-         [:> numeric-input* {:no-validate true
-                             :placeholder (if (= :multiple (:x values)) (tr "settings.multiple") "--")
-                             :on-change on-pos-x-change
-                             :drag-direction "ew"
-                             :disabled disabled-position-x?
-                             :class (stl/css :numeric-input)
-                             :value (:x values)}]]
+         [:> transactional-input* {:no-validate true
+                                   :placeholder (if (= :multiple (:x values)) (tr "settings.multiple") "--")
+                                   :on-change on-pos-x-change
+                                   :drag-direction "ew"
+                                   :disabled disabled-position-x?
+                                   :class (stl/css :numeric-input)
+                                   :value (:x values)}]]
 
         [:div {:class (stl/css-case :y-position true
                                     :disabled disabled-position-y?)
                :title (tr "workspace.options.y")}
          [:span {:class (stl/css :icon-text)} "Y"]
-         [:> numeric-input* {:no-validate true
-                             :placeholder (if (= :multiple (:y values)) (tr "settings.multiple") "--")
-                             :disabled disabled-position-y?
-                             :on-change on-pos-y-change
-                             :drag-direction "ns"
-                             :class (stl/css :numeric-input)
-                             :value (:y values)}]]])
+         [:> transactional-input* {:no-validate true
+                                   :placeholder (if (= :multiple (:y values)) (tr "settings.multiple") "--")
+                                   :disabled disabled-position-y?
+                                   :on-change on-pos-y-change
+                                   :drag-direction "ns"
+                                   :class (stl/css :numeric-input)
+                                   :value (:y values)}]]])
      (when (or (options :rotation) (options :radius))
        [:div {:class (stl/css :rotation-radius)}
         (when (options :rotation)
           [:div {:class (stl/css :rotation)
                  :title (tr "workspace.options.rotation")}
            [:span {:class (stl/css :icon)}  i/rotation]
-           [:> numeric-input*
+           [:> transactional-input*
             {:no-validate true
              :min -359
              :max 359

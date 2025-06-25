@@ -34,6 +34,7 @@
     [app.common.data.macros :as dm]
     [app.common.geom.point :as gpt]
     [app.common.schema :as sm]
+    [app.common.uuid :as uuid]
     [app.main.data.workspace.undo :as dwu]
     [app.main.refs :as refs]
     [app.main.store :as st]
@@ -49,11 +50,11 @@
     [beicon.v2.core :as rx]
     [cljs.core :as c]
     [cuerdas.core :as str]
-    [goog.events :as events]
     [potok.v2.core :as ptk]
     [rumext.v2 :as mf]))
 
 (def ^:private ^:const default-input-debounce-ms 800)
+(def ^:private ^:const default-input-drag-sensitivity 1)
 (def ^:private ^:const default-input-large-step 10)
 (def ^:private ^:const default-input-small-step 0.1)
 
@@ -66,7 +67,8 @@
 (defn pairwise
   "Groups pairs of consecutive emissions together and emits them in tuples."
   [ob]
-  (rx/pipe (pairwise* ob) ob))
+  (rx/pipe (pairwise*) ob))
+
 
 (defn from-event
   "Creates an Observable by attaching an event listener to an event target
@@ -77,17 +79,67 @@
   ([et ev & [opts]]
    (rxjs/fromEvent et ev (clj->js (or opts {})))))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Effects
+(def ^function start-with*
+  rxjs/startWith)
 
-;; FIXME: this is probably unnecessary / done elsewhere / race-condition prone
-(defn- effect-reset!
-  "An effect that sets the state of an atom."
-  [^atom flag state]
-  (ptk/reify ::effect-reset
-    ptk/EffectEvent
-    (effect [_ _ _]
-      (reset! flag state))))
+(defn start-with
+  "Emits the provided value before any other emissions from the source Observable."
+  [& args]
+  (let [values (butlast args)
+        ob     (last args)]
+    (rx/pipe (apply start-with* values) ob)))
+
+(def ^function end-with*
+  rxjs/endWith)
+
+(defn end-with
+  "Emits the provided value(s) after all other emissions from the source Observable."
+  [& args]
+  (let [values (butlast args)
+        ob     (last args)]
+    (rx/pipe (apply end-with* values) ob)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; TODO more beicon PRs
+
+(def ^function window*
+  rxjs/window)
+
+(defn window
+  "Groups emissions from the source Observable into windows, each containing
+   emissions until the next emission from the source Observable.
+   Args:
+      boundaries: an Observable that emits when to close the current window
+      ob:         the source Observable to group into windows "
+  [boundaries ob]
+  (rx/pipe (window* boundaries) ob))
+
+
+(def ^function exhaust-map*
+  rxjs/exhaustMap)
+
+(defn exhaust-map
+  "Maps each value from the source Observable to an Observable, but ignores
+   subsequent values until the inner Observable completes.
+   Args:
+     f: a function that takes a value and returns an Observable
+     ob: the source Observable "
+  [f ob]
+  (rx/pipe (exhaust-map* f) ob))
+
+
+(def ^function repeat*
+  rxjs/repeat)
+
+(defn rx-repeat
+  "Repeats the source Observable indefinitely.
+   Args:
+     ob: the source Observable"
+  [ob]
+  (rx/pipe (repeat*) ob))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn- cursor-from-direction
   "Returns the cursor class name based on the direction keyword.
@@ -128,10 +180,6 @@
         (when (not= class "default")
           (.add (.-classList body) class))))))
 
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Wheel handling
-
 (defn- dim-from-direction
   "Given a direction keyword, returns a function that extracts the relevant
    coordinate from a point map for drag operations. For right-to-left (:we)
@@ -153,228 +201,6 @@
     :rotate (fn [pt] (dm/get-prop pt :x))
     (fn [pt] (dm/get-prop pt :x))))
 
-(defn- start-input-wheel
-  "Starts a mouse wheel event handler to change the value of an input.
-
-   Starts an undo transaction limited to (debounced) mouse wheel events.
-   After an interval of inactivity, the transaction is committed.
-
-   Args:
-     direction:      keyword indicating direction to listen to
-                     (:ew, :we, :ns, :sn)
-     wheel-stream:   a stream of mouse wheel events
-     set-delta:      function to call with the new value delta
-     transaction-id: an atom holding a fresh transaction ID to use. It will
-                     be reset to nil after the transaction is committed.
-
-   Returns a WatchEvent that listens for mouse wheel events and applies the
-   deltas within a transaction."
-  [direction wheel-stream set-delta ^atom transaction-id]
-  (let [debounce-ms (get refs/workspace-layout :input-debounce-ms 800)
-        get-dim     (dim-from-direction direction)
-        set-delta   (fn [event]
-                      (let [delta (get-dim (mse/get-pointer-position (:event event)))
-                            up?   (> delta 0)
-                            down? (< delta 0)]
-                        (set-delta (:react-event event) up? down? true)))]
-
-    (ptk/reify ::start-input-wheel
-      ptk/WatchEvent
-      (watch [_ _ stream]
-        (let [stopper      (rx/merge
-                            (rx/debounce debounce-ms wheel-stream)
-                            (mse/drag-stopper stream {:blur? true :up-mouse? false}))
-              wheel-stream (rx/take-until stopper wheel-stream)]
-
-          (rx/concat
-           (rx/of (dwu/start-undo-transaction @transaction-id {:timeout false}))
-           (rx/tap set-delta wheel-stream)
-           (rx/of (dwu/commit-undo-transaction @transaction-id))
-           (rx/of (effect-reset! transaction-id nil))))))))
-
-(defn on-mouse-wheel* [ref local-stream set-delta transaction-id]
-  (mf/use-fn
-   (mf/deps ref local-stream set-delta transaction-id)
-   (fn [^js event]
-     (when-let [node (mf/ref-val ref)]
-       (when (identical? (dom/get-target event) node)
-         (let [event      (.getBrowserEvent event)
-               event* ^js (nw/normalize-wheel event)
-               delta-y    (.-spinY event*)
-               delta-x    (.-spinX event*)]
-           (dom/prevent-default event)
-           (dom/stop-propagation event)
-           (dom/select-text! node)
-           (rx/push! local-stream {:type :wheel
-                                   :react-event event
-                                   :event (mse/->PointerEvent
-                                           :delta (gpt/point delta-x delta-y)
-                                           (kbd/ctrl? event)
-                                           (kbd/shift? event)
-                                           (kbd/alt? event)
-                                           (kbd/meta? event))})
-           (when (nil? @transaction-id)
-             (let [id (js/Symbol)]
-               (reset! transaction-id id)
-               ;; TODO: do I need to make direction configurable
-               ;; e.g. for users of reverse scrolling?
-               (st/emit! (start-input-wheel :sn local-stream
-                                            set-delta transaction-id))))))))))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Drag handling
-
-(defn- start-input-dragging
-  "Starts dragging on an input element to change its value.
-
-   Wraps changes in an undo transaction and sets the cursor style.
-
-   Args:
-     direction:    keyword indicating direction (:ew, :we, :ns, :sn, :rotate)
-     local-stream: a stream of events for the numeric imput component
-     set-delta:    function to call with the new value delta
-     transaction-id: an atom holding a fresh transaction ID to use.
-                     It will be reset to nil after the transaction is committed.
-
-   Returns a WatchEvent that listens for mouse movements and applies the delta."
-  [direction local-stream set-delta ^atom transaction-id]
-  (let [sensitivity (get refs/workspace-layout :input-drag-sensitivity 1)
-        get-dim     (dim-from-direction direction)
-
-        set-delta
-        (fn [event]
-          (let [diff  (get-dim (:delta event))
-                up?   (> diff 0)
-                down? (< diff 0)]
-            (when (> (abs diff) sensitivity)
-              (set-delta (:event event) up? down? true))))
-
-        make-delta-event
-        (fn [[prev curr]]
-          (let [prev-pos (dom/get-client-position prev)
-                curr-pos (dom/get-client-position curr)]
-            {:event curr
-             :delta (gpt/subtract curr-pos prev-pos)}))]
-
-    (ptk/reify ::start-input-dragging
-      ptk/WatchEvent
-      (watch [_ _ stream]
-        (let [stopper      (rx/merge
-                            (from-event globals/window "pointerup" #js {:once true})
-                            (rx/filter kbd/esc? local-stream)
-                            ;; listen to mouseup events over the viewport:
-                            (mse/drag-stopper stream {:blur? false :up-mouse? true}))
-              delta-stream (->> (rx/from-event globals/window "pointermove")
-                                (pairwise)
-                                (rx/take-until stopper)
-                                (rx/map make-delta-event))]
-          (rx/concat
-           (rx/of (set-drag-cursor direction))
-           (rx/of (dwu/start-undo-transaction @transaction-id {:timeout false}))
-           (rx/tap set-delta delta-stream)
-           (rx/of (dwu/commit-undo-transaction @transaction-id))
-           (rx/of (set-drag-cursor nil))
-           (rx/of (effect-reset! transaction-id nil))))))))
-
-(defn on-drag-start* [ref drag-direction local-stream set-delta ^atom transaction-id]
-  (mf/use-fn
-   (mf/deps ref drag-direction local-stream set-delta transaction-id)
-   (fn [^js event]
-     (when-let [node (mf/ref-val ref)]
-       (when (identical? (dom/get-target event) node)
-         (dom/select-text! node)
-         (dom/prevent-default event)
-         (dom/stop-immediate-propagation (.-nativeEvent event))
-         (when (nil? @transaction-id)
-           (let [id (js/Symbol)]
-             (reset! transaction-id id)
-             (st/emit! (start-input-dragging drag-direction
-                                             local-stream
-                                             set-delta
-                                             transaction-id)))))))))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Keyboard handling
-
-(defn- start-input-keyboard
-  "Starts a keyboard action to change the value of an input.
-
-   Args:
-     stream:       the stream of events for the numeric input component
-     set-delta:    function to call with the new value delta.
-     last-value*:  a reference to the last value before any transactional change
-
-   Returns a WatchEvent that listens for keyboard events and applies the deltas."
-  [ref curr-value* last-value* local-stream set-delta transaction-id]
-  (let [debounce-ms (get refs/workspace-layout :input-debounce-ms default-input-debounce-ms)
-        set-delta    (fn [^js ev]
-                       (let [up?   (or (kbd/up-arrow? ev) (kbd/page-up? ev))
-                             down? (or (kbd/down-arrow? ev) (kbd/page-down? ev))]
-                         (set-delta ev up? down? true)))]
-
-    (ptk/reify ::start-input-keyboard
-      ptk/WatchEvent
-      (watch [_ _ _]
-        (let [stopper    (rx/merge
-                          (rx/debounce debounce-ms local-stream)
-                          (rx/filter kbd/esc? local-stream)
-                          (rx/filter kbd/enter? local-stream)
-                          (from-event (mf/ref-val ref) "blur" #js {:once true}))
-              kbd-stream (rx/take-until stopper local-stream)]
-          (rx/concat
-           (rx/of (dwu/start-undo-transaction @transaction-id {:timeout false}))
-           (rx/tap set-delta kbd-stream)
-           (rx/of (dwu/commit-undo-transaction @transaction-id))
-           (rx/of (effect-reset! last-value* @curr-value*))
-           (rx/of (effect-reset! transaction-id nil))))))))
-
-(defn on-key-down*
-  "Handles keyboard events for the numeric input component.
-   
-   Listens for up/down arrow keys, page up/down, enter, tab, starting a
-   transaction when the user interacts with the input via arrow keys or
-   page up/down keys. It also handles canceling and validating input
-   with Escape, Tab and Enter.
-
-
-   Args:
-     ref:          a reference to the input DOM element
-     apply-value:  function to apply the new value to the input
-     tab-accepts?: whether the tab key should accept the input value
-     curr-value*:  a reference to the current value of the input
-     last-value*:  a reference to the last value before any transactional change
-     local-stream: a stream of events for the numeric input component
-     set-delta:    function to call with the new value delta
-     transaction-id: an atom holding a fresh transaction ID to use.
-                     It will be reset to nil after the transaction is committed."
-  [ref apply-value tab-accepts? curr-value* last-value* local-stream set-delta transaction-id]
-  (mf/use-fn
-   (mf/deps ref apply-value tab-accepts? curr-value* last-value* local-stream set-delta transaction-id)
-   (fn [^js event]
-     (let [up?     (or (kbd/up-arrow? event) (kbd/page-up? event))
-           down?   (or (kbd/down-arrow? event) (kbd/page-down? event))
-           cancel? (kbd/esc? event)
-           accept? (or (kbd/enter? event)
-                       (and (kbd/tab? event) tab-accepts?))
-           node    (mf/ref-val ref)]
-       (cond
-         (or down? up?) (do
-                          (dom/prevent-default event)
-                          (rx/push! local-stream event)
-                          (when (nil? @transaction-id)
-                            (let [id (js/Symbol)]
-                              (reset! transaction-id id)
-                              (st/emit! (start-input-keyboard ref curr-value* last-value*
-                                                              local-stream set-delta transaction-id)))))
-         cancel? (do
-                   (rx/push! local-stream event)
-                   (apply-value event @last-value* false)
-                   (dom/blur! node))
-         accept? (do
-                   (rx/push! local-stream event)
-                   (apply-value event @curr-value* false)
-                   (reset! last-value* @curr-value*)))))))
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Value handling
 
@@ -394,14 +220,14 @@
 
    Returns:
      A number within the specified range, or the default value if parsing fails."
-  [ref min-value max-value initial nillable? default]
+  [ref min-value max-value ^atom initial nillable? default]
   (mf/use-fn
-   (mf/deps min-value max-value initial nillable? default)
+   (mf/deps ref min-value max-value initial nillable? default)
    (fn []
      (when-let [node (mf/ref-val ref)]
        (let [new-value (-> (dom/get-value node)
                            (str/strip-suffix ".")
-                           (smt/expr-eval initial))]
+                           (smt/expr-eval @initial))]
          (cond
            (d/num? new-value)
            (-> new-value
@@ -415,81 +241,158 @@
            nillable?
            default
 
-           :else initial))))))
+           :else @initial))))))
 
-(defn- apply-value*
-  "Returns a callback that applies the new value to the input element,
-   updating the DOM and triggering the on-change callback if provided.
+(defn- compute-delta*
+  ""
+  [wrap-value? min-value max-value step-value parse-value default]
+  (fn [^js event ^boolean up? ^boolean down?]
+    (let [current-value (parse-value)
+          current-value (or current-value
+                            (cond (and down? (d/num? max-value)) max-value
+                                  (and up? (d/num? min-value)) min-value
+                                  :else (d/nilv default 0)))
 
-   Args:
-     on-change:      a function to call when the value changes
-     update-input:   a function to update the input value in the DOM
-     initial-value:  the initial value of the input
-     last-value*:    a reference to the last value before any transactional change
-   "
-  [on-change update-input initial-value last-value*]
-  (mf/use-fn
-   (mf/deps on-change update-input initial-value last-value*)
-   (fn [^js event new-value ^boolean transaction?]
-     (when (and (not= new-value (or @last-value* initial-value))
-                (fn? on-change))
-       ;; FIXME: on-change very slow, makes the handler laggy
-       (on-change new-value event transaction?))
-     (update-input new-value))))
+          big-step   (get refs/workspace-layout :input-large-step default-input-large-step)
+          small-step (get refs/workspace-layout :input-small-step default-input-small-step)
+          increment  (cond (kbd/shift? event) big-step
+                           (kbd/alt? event) small-step
+                           :else 1)
+          increment  (* increment (if up? step-value (- step-value)))
 
-(defn- apply-delta*
-  "Returns a callback that increases the value of the numeric input by
-   a delta, with increment depending on keyboard modifiers.
+          new-value (+ current-value increment)
+          new-value (cond
+                      (and wrap-value? (d/num? max-value min-value)
+                           (> new-value max-value) up?)
+                      (-> new-value (- max-value) (+ min-value) (- step-value))
 
-   Shift increases the value by a large step, Alt increases the value by
-   a small step.
+                      (and wrap-value? (d/num? max-value min-value)
+                           (< new-value min-value) down?)
+                      (-> new-value (- min-value) (+ max-value) (+ step-value))
 
-   Args:
-     wrap-value?:  whether to wrap around the value when exceeding min/max
-     min-value:    minimum allowed value
-     max-value:    maximum allowed value
-     parse-value:  function to parse the current value from the input
-     apply-value:  function to apply the new value to the input
-     default:      default value to use if parsing fails or is nillable
-     step-value:   step increment for value changes
+                      (and (d/num? min-value) (< new-value min-value))
+                      min-value
 
-   Returns a function that handles up/down events and applies the new value."
-  [wrap-value? min-value max-value parse-value apply-value default step-value]
-  (mf/use-fn
-   (mf/deps wrap-value? min-value max-value parse-value apply-value
-            default step-value)
-   (fn [^js event ^boolean up? ^boolean down? ^boolean transaction?]
-     (let [current-value (parse-value)
-           current-value (or current-value
-                             (cond (and down? (d/num? max-value)) max-value
-                                   (and up? (d/num? min-value)) min-value
-                                   :else (d/nilv default 0)))
+                      (and (d/num? max-value) (> new-value max-value))
+                      max-value
 
-           big-step   (get refs/workspace-layout :input-large-step default-input-large-step)
-           small-step (get refs/workspace-layout :input-small-step default-input-small-step)
-           increment  (cond (kbd/shift? event) big-step
-                            (kbd/alt? event) small-step
-                            :else 1)
-           increment  (* increment (if up? step-value (- step-value)))
+                      :else new-value)]
+      new-value)))
 
-           new-value (+ current-value increment)
-           new-value (cond
-                       (and wrap-value? (d/num? max-value min-value)
-                            (> new-value max-value) up?)
-                       (-> new-value (- max-value) (+ min-value) (- step-value))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Input streams
 
-                       (and wrap-value? (d/num? max-value min-value)
-                            (< new-value min-value) down?)
-                       (-> new-value (- min-value) (+ max-value) (+ step-value))
+(defn- drag-stream
+  ""
+  [node compute-delta direction]
+  (let [sensitivity (get refs/workspace-layout :input-drag-sensitivity default-input-drag-sensitivity)
+        get-dim     (dim-from-direction direction)
 
-                       (and (d/num? min-value) (< new-value min-value))
-                       min-value
+        make-change
+        (fn [[prev curr]]
+          (let [prev-pos (dom/get-client-position prev)
+                curr-pos (dom/get-client-position curr)
+                delta    (gpt/subtract curr-pos prev-pos)
+                diff     (get-dim delta)
+                up?      (> diff 0)
+                down?    (< diff 0)
+                value    (when (> (abs diff) sensitivity)
+                           (compute-delta curr up? down?))]
+            [value curr]))
 
-                       (and (d/num? max-value) (> new-value max-value))
-                       max-value
+        start-s
+        (->> (from-event node "dragstart" #js {:passive false})
+                      ;; (rx/tap #(js/console.log "drag-stream: dragstart" %))
+             (rx/tap dom/prevent-default)
+             (rx/tap dom/stop-propagation)
+             (rx/share))
+        end-s
+        (rx/share
+         (rx/merge
+          (->> (rx/merge
+                (from-event node "dragend")
+                (from-event globals/window "pointerup")
+                (->> (from-event node "keydown")
+                     (rx/filter kbd/esc?)))
+               (rx/tap #(js/console.log "drag-stream: event type" (.-type ^js %)))
+               (rx/tap dom/prevent-default)
+               (rx/tap dom/stop-immediate-propagation))
+          (mse/drag-stopper st/stream)))
 
-                       :else new-value)]
-       (apply-value event new-value transaction?)))))
+        ;; Builds the inner stream that emits drag events
+        make-drag-s
+        (fn [_start-ev]
+          (let [move-s  (->> (from-event globals/window "pointermove")
+                             (pairwise)
+                             (rx/share))
+                begin   (->> move-s
+                             (rx/first)
+                              ;; (rx/tap #(js/console.log "drag-stream: pointermove" %))
+                             (rx/map make-change)
+                             (rx/tap #(set-drag-cursor direction)))
+                updates (->> move-s
+                             (rx/map make-change))
+                end     (->> end-s
+                             (rx/first)
+                             (rx/tap #(set-drag-cursor nil))
+                             (rx/tap #(dom/select-text! node)))]
+
+            (rx/concat
+             (->> (rx/merge begin updates)
+                  (rx/take-until end-s))
+             end)))]
+    (exhaust-map make-drag-s start-s)))
+
+(defn- keyboard-stream
+  ""
+  [node compute-delta initial-value* parse-value]
+  (let [up?      #(or (kbd/up-arrow? %) (kbd/page-up? %))
+        down?    #(or (kbd/down-arrow? %) (kbd/page-down? %))
+        is-step? #(or (up? %) (down? %))
+        accept?  #(or (kbd/enter? %) (kbd/tab? %))
+        cancel?  kbd/esc?
+
+        ;; raw keydown stream (cold)
+        event-s    (rx/share (from-event node "keydown" #js {:passive false}))
+
+        step-s (->> event-s
+                    (rx/filter is-step?)
+                    (rx/tap dom/prevent-default)
+                    (rx/tap dom/stop-propagation)
+                    (rx/map (fn [e] [(compute-delta e (up? e) (down? e)) e])))
+
+        accept-s (->> event-s
+                      (rx/filter accept?)
+                      (rx/map (fn [e] [(parse-value) e])))
+
+        cancel-s (->> event-s
+                      (rx/filter cancel?)
+                      ; This should both push the change and leave focus
+                      ; triggering a transaction commit in transactional-input*
+                      (rx/map (fn [e] [@initial-value* e])))]
+
+    (rx/merge step-s accept-s cancel-s)))
+
+(defn wheel-delta [^js event compute-delta]
+  (let [event* ^js (nw/normalize-wheel event)
+        delta-pt   (gpt/point (.-spinX event*) (.-spinY event*))
+        get-dim    (dim-from-direction :sn)
+        delta      (get-dim delta-pt)
+        up?        (> delta 0)
+        down?      (< delta 0)]
+    (compute-delta event up? down?)))
+
+(defn wheel-stream
+  ""
+  [node compute-delta]
+  (let [make-change (fn [^js event]
+                      [(wheel-delta event compute-delta) event])]
+    (->> (from-event node "wheel" #js {:passive false})
+         (rx/tap dom/prevent-default)
+         (rx/tap dom/stop-immediate-propagation)
+         (rx/tap dom/stop-propagation)
+         (rx/map make-change))))
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Component
@@ -509,18 +412,12 @@
 
         on-blur      (unchecked-get props "onBlur")
         on-focus     (unchecked-get props "onFocus")
-        on-change    (when-let [f (unchecked-get props "onChange")]
-                       ;; on-change args: new-value js-event in-transaction?
-                       #(if drag-direction (f %1 %2 %3) (f %1 %2)))
+        on-change    (unchecked-get props "onChange")
 
         title        (unchecked-get props "title")
         default      (unchecked-get props "default")
         nillable?    (unchecked-get props "nillable")
         class        (d/nilv (unchecked-get props "className") "")
-        ;; Whether the tab key should be used to accept the input value before
-        ;; moving to the next input.
-        ;;(d/nilv (unchecked-get props "tabAccepts") true)
-        tab-accepts? true
 
         min-value    (d/parse-double min-value)
         max-value    (d/parse-double max-value)
@@ -537,102 +434,216 @@
 
         ;; This represents the previous value and is used as
         ;; initial value for simple math expression evaluation.
-        initial-value (when (not= :multiple value-str) (d/parse-double value-str default))
-
-        ;; Last value before any transactional change
-        last-value* (mf/use-var initial-value)
+        initial-value* (mf/use-var (when (not= :multiple value-str)
+                                     (d/parse-double value-str default)))
 
         ;; Current value of the input, updated on-change, used to apply
         ;; unapplied changes upon unmount / blur
-        curr-value* (mf/use-var initial-value)
+        curr-value* (mf/use-var @initial-value*)
 
-        ;; Transactions are created when the user drags, uses keyboard arrows or
-        ;; mouse wheel to change the value of the input.
-        transaction-id (mf/use-var nil)
+        ;; Stream of changes (drag, wheel, keyboard)
+        change-s   (mf/use-memo #(rx/subject))
 
-        ;; Passes wheel and kbdup/down events from event handlers installed by
-        ;; this component to potok events setting the new value.
-        local-stream   (mf/use-memo #(rx/subject))
+        unmount-s (mf/use-memo #(rx/subject))
 
-        update-input
-        (mf/use-fn
-         (fn [new-value]
-           (when-let [node (mf/ref-val ref)]
-             (reset! curr-value* new-value)
-             (dom/set-value! node (fmt/format-number new-value)))))
 
-        parse-value (parse-value* ref min-value max-value initial-value nillable? default)
-        apply-value (apply-value* on-change update-input initial-value last-value*)
-        apply-delta (apply-delta* wrap-value? min-value max-value parse-value
-                                  apply-value default step-value)
+        ;; fn that parses the value from the input element, applying
+        ;; min and max constraints, and returning a default value if the input
+        ;; is nillable or invalid.
+        parse-value (parse-value* ref min-value max-value initial-value* nillable? default)
 
-        on-mouse-wheel (on-mouse-wheel* ref local-stream apply-delta transaction-id)
-        on-drag-start  (on-drag-start* ref drag-direction local-stream apply-delta transaction-id)
-        on-key-down    (on-key-down*  ref apply-value tab-accepts? curr-value* last-value*
-                                      local-stream apply-delta transaction-id)
+        ;; Function that computes the delta value based on the current value,
+        ;; min and max values, step value, and the parse function.
+        ;; This is used for wheel, up/down and drag interactions.
+        compute-delta (compute-delta* wrap-value? min-value max-value step-value parse-value default)
 
+        ;; Called on every modification of the input value not handled via the change-s,
+        ;; e.g. number input, paste, etc.
         handle-change
         (mf/use-fn
          (mf/deps parse-value)
-         #(reset! curr-value* (parse-value)))
+         (fn [^js event]
+           (when-let [new-value (parse-value)]
+             (js/console.log "handle-change called with "
+                             "curr-value*:" @curr-value*
+                             "new-value:" new-value
+                             "event:" (if event (.-type event) "nil"))
+             (reset! curr-value* new-value))))
 
-        handle-blur
+        ;; Called on changes induced by drag, wheel, keyboard up/down
+        on-change'
         (mf/use-fn
-         (mf/deps apply-value on-blur)
-         (fn [event]
-           (apply-value event @curr-value*)
+         (mf/deps parse-value)
+         (fn [new-value ^js event]
+           (when new-value
+             (reset! curr-value* new-value)
+             (js/console.log "on-change' called with parse-value:" (parse-value)
+                             "curr-value*:" @curr-value*
+                             "event:" (if event (.-type event) "nil"))
+             (when-let [node (mf/ref-val ref)]
+               (dom/set-value! node (fmt/format-number new-value)))
+             (on-change new-value event))))
+
+        on-unmount
+        (mf/use-fn
+         (mf/deps unmount-s ref curr-value*)
+         (fn [^js event]
+           (st/emit! (set-drag-cursor nil))
+           (when (not= @curr-value* @initial-value*)
+             (rx/push! change-s [@curr-value* event]))
+           ;; FIXME: Is this needed to free resources in change-s?
+           ;; Should I rather call rx/end! on change-s?
+           (.next unmount-s)))
+
+        ;; Exits the input component, implicitly accepting the current value 
+        on-blur'
+        (mf/use-fn
+         (mf/deps on-blur on-unmount)
+         (fn [^js event]
+           (on-unmount event)
            (when (fn? on-blur)
              (on-blur event))))
 
-        handle-unmount
+        on-focus'
         (mf/use-fn
-         (mf/deps local-stream)
-         (fn []
-           (st/emit! (set-drag-cursor nil))
-           (rx/end! local-stream) ;; FIXME: Is this needed?
-           (handle-blur)))
-
-        handle-focus
-        (mf/use-fn
-         (mf/deps on-focus select-on-focus?)
+         (mf/deps ref on-focus select-on-focus? on-change parse-value)
          (fn [event]
-           (reset! last-value* (parse-value))
-           (let [target (dom/get-target event)]
-             (when (fn? on-focus)
-               (on-focus event))
+           (reset! curr-value* (parse-value))
+           (reset! initial-value* @curr-value*)
+           (when (fn? on-focus)
+             (on-focus event))
 
-             (when select-on-focus?
+           ;; only create streams upon focus and if the on-change handler is provided
+           (when (fn? on-change)
+             (let [input-node (mf/ref-val ref)
+                   stopper    (rx/merge
+                               unmount-s
+                               (from-event input-node "blur" #js {:passive false :once true}))
+                   wheel-s    (wheel-stream input-node compute-delta)
+                   drag-s     (drag-stream input-node compute-delta drag-direction)
+                   keyboard-s (keyboard-stream input-node compute-delta initial-value* parse-value)
+                   change-s'  (->> (rx/merge wheel-s drag-s keyboard-s)
+                                   (rx/take-until stopper))]
+               (rx/sub! change-s' {:next (partial rx/push! change-s)
+                                   :error (fn [e] (js/console.error "Error in change stream:" e))
+                                   :complete #(js/console.log "Change stream completed")})))
+
+           (when select-on-focus?
+             (let [target (dom/get-target event)]
                (dom/select-text! target)
-               ;; In webkit browsers the mouseup event will be called after the on-focus causing and unselect
+                ;; In webkit browsers the mouseup event will be called after the on-focus causing and unselect
                (.addEventListener target "mouseup" dom/prevent-default #js {:once true})))))
 
         props (-> (obj/clone props)
                   (obj/unset! "dragDirection")
                   (obj/unset! "selectOnFocus")
                   (obj/unset! "nillable")
-                  (obj/set! "value" mf/undefined)
                   (obj/set! "onChange" handle-change)
+                  (obj/set! "value" mf/undefined)
                   (obj/set! "className" (str/join " " [class (cursor-from-direction drag-direction)]))
                   (obj/set! "type" "text")
                   (obj/set! "ref" ref)
-                  (obj/set! "defaultValue" (fmt/format-number initial-value))
+                  (obj/set! "defaultValue" (fmt/format-number @initial-value*))
                   (obj/set! "title" title)
-                  (obj/set! "onKeyDown" on-key-down)
-                  (obj/set! "onDragStart" on-drag-start)
-                  (obj/set! "onBlur" handle-blur)
-                  (obj/set! "onFocus" handle-focus))]
+                  (obj/set! "onBlur" on-blur')
+                  (obj/set! "onFocus" on-focus'))]
 
-    (mf/with-effect [initial-value]
+    (mf/with-effect [on-unmount ref]
       (when-let [input-node (mf/ref-val ref)]
-        (dom/set-value! input-node (fmt/format-number initial-value))))
+        (dom/set-value! input-node (fmt/format-number @initial-value*)))
+      #(on-unmount #js {:type "unmount"}))
 
-    (mf/with-effect [handle-unmount] handle-unmount)
-
-    (mf/with-effect []
-      (when-let [node (mf/ref-val ref)]
-        (let [keys [(events/listen node "wheel" on-mouse-wheel #js {:passive false})
-                    (events/listen node "dragstart" dom/prevent-default)]]
-          (doseq [key keys]
-            #(events/unlistenByKey key)))))
+    (mf/with-effect [change-s on-change']  ;
+      (js/console.log "Subscribing to change stream")
+      (let [subs [(rx/sub! change-s
+                           (fn [[value ^js event]]
+                             (js/console.log "change-s value:" value
+                                             "event:" (if event (.-type event) "nil"))))
+                  (rx/sub! change-s (partial apply on-change'))]]
+        #(doseq [s subs]
+           (rx/dispose! s))))
 
     [:> :input props]))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Transactional Input wrapper
+
+(def ^:private schema:transactional-input  ;TODO
+  [:map
+   [:label {:optional true} :string]
+   [:class {:optional true} :string]])
+
+;; FIXME: change this to uuid/next or js.Symbol
+(defonce counter (atom 0))
+
+(mf/defc transactional-input*
+  "A component that wraps a numeric input allowing for transactional changes."
+  {::mf/forward-ref true}
+  ;;  ::mf/schema schema:transactional-input
+
+  [{:keys [on-change on-blur] :rest props} ref]
+  (let [debounce-ms    (get refs/workspace-layout :input-debounce-ms default-input-debounce-ms)
+        transaction-id (mf/use-var nil)
+        local-value*   (mf/use-var nil) ;; Holds the current value of the input
+        timer          (mf/use-var nil) ;; Timer for committing the transaction
+
+        commit
+        (mf/use-fn
+         (mf/deps transaction-id timer)
+         (fn []
+           (when @timer
+             (js/clearTimeout @timer))
+           (reset! timer nil)
+           (when @transaction-id
+             (js/console.log "Committing transaction" (subs (str @transaction-id) 0 6))
+             (st/emit! (dwu/commit-undo-transaction @transaction-id))
+             (reset! transaction-id nil))))
+
+        ;; Handles changes to the input value, starting a transaction if needed.
+        ;; Args:
+        ;;   - value: the new value of the input
+        ;;   - event: the JS event that triggered the change
+        on-change'
+        (mf/use-fn
+         (mf/deps on-change transaction-id timer local-value*)
+         (fn [value ^js event]
+           (js/console.log "on-change wrapper -- "
+                           "value:" value
+                           "local value:" @local-value*
+                           "event:" (if event (.-type event) "nil")
+                           "transaction-id:" (subs (str @transaction-id) 0 6)
+                           "timer:" @timer)
+
+           (when (and value (not= @local-value* value))
+             (when @timer
+               (js/clearTimeout @timer))
+             (js/console.log "Setting new timer for commit")
+             (reset! timer (js/setTimeout commit debounce-ms))
+
+             (reset! local-value* value)
+             (when (nil? @transaction-id)
+               (reset! transaction-id (uuid/next))
+               (js/console.log "Starting new transaction" (subs (str @transaction-id) 0 6))
+               (st/emit! (dwu/start-undo-transaction @transaction-id {:timeout 0})))
+
+             (js/console.log "Updating value in transaction" (subs (str @transaction-id) 0 6))
+             (on-change value event true))))
+
+        ;; Blur events always commit the current transaction.
+        on-blur'
+        (mf/use-fn
+         (mf/deps on-blur on-change')
+         (fn [^js event]
+           (js/console.log "on-blur wrapper -- event:" (if event (.-type event) "nil"))
+           (commit)
+           (when (fn? on-blur)
+             (on-blur event))))
+
+        props (mf/spread-props props {:on-change on-change' :on-blur on-blur'})]
+
+    ;; Always commit on unmount
+    (mf/with-effect [commit] commit)
+
+    [:> numeric-input* props]))
+
