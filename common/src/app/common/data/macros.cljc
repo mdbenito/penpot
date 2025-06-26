@@ -149,3 +149,8 @@
   "Truncates a string to a certain length"
   [s max-length]
   (subs s 0 (min max-length (count s))))
+
+(defmacro nnil?
+  "A macro to check if a value is not nil. Returns true if the value is not nil, false otherwise."
+  [value]
+  `(not (nil? ~value)))
