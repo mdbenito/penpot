@@ -151,9 +151,6 @@
   "All tokens related ephimeral state"
   (l/derived :workspace-tokens st/state))
 
-(def disable-viewport-cursor
-  (l/derived :disable-viewport-cursor? workspace-local))
-
 ;; TODO: rename to workspace-selected (?)
 ;; Don't use directly from components, this is a proxy to improve performance of selected-shapes
 (def ^:private selected-shapes-data

@@ -120,9 +120,6 @@
         selected-shapes   (->> selected
                                (into [] (keep (d/getf objects-modified)))
                                (not-empty))
-        ;; HACK: we need a better way to disable the custom cursor while dragging
-        ;; in numeric-input*
-        disable-cursor?   (mf/deref refs/disable-viewport-cursor)
 
         ;; STATE
         alt?              (mf/use-state false)
@@ -281,8 +278,7 @@
 
     (hooks/setup-dom-events zoom disable-paste in-viewport? read-only? drawing-tool drawing-path?)
     (hooks/setup-viewport-size vport viewport-ref)
-    (hooks/setup-cursor cursor alt? mod? space? panning drawing-tool drawing-path? node-editing? z?
-                        read-only? disable-cursor?)
+    (hooks/setup-cursor cursor alt? mod? space? panning drawing-tool drawing-path? node-editing? z? read-only?)
     (hooks/setup-keyboard alt? mod? space? z? shift?)
     (hooks/setup-hover-shapes page-id move-stream base-objects transform selected mod? hover measure-hover
                               hover-ids hover-top-frame-id @hover-disabled? focus zoom show-measures?)
