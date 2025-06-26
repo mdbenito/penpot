@@ -51,23 +51,28 @@
       (str/replace #"\s+$" "")))
 
 (defn encode-svg-cursor
-  [id rotation x y height]
-  (let [svg-path  (str cursor-folder "/" (name id) ".svg")
-        data      (-> svg-path io/resource slurp parse-svg)
-        data      (u/percent-encode data)
+  ([id rotation x y height]
+   (encode-svg-cursor id rotation x y height true))
+  ([id rotation x y height css?]
+   (let [svg-path  (str cursor-folder "/" (name id) ".svg")
+         data      (-> svg-path io/resource slurp parse-svg)
+         data      (u/percent-encode data)
 
-        data (if rotation
-               (str/fmt "%3Cg transform='rotate(%s 8,8)'%3E%s%3C/g%3E" rotation data)
-               data)]
-    (str "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' width='20px' "
-         "height='" height "px' %3E" data "%3C/svg%3E\") " x " " y ", auto")))
+         data (if rotation
+                (str/fmt "%3Cg transform='rotate(%s 8,8)'%3E%s%3C/g%3E" rotation data)
+                data)
+
+         postfix (if css? (str x " " y ", auto") "")]
+     (str "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' width='20px' "
+          "height='" height "px' %3E" data "%3C/svg%3E\") " postfix))))
 
 (defmacro cursor-ref
   "Creates a static cursor given its name, rotation and x/y hotspot"
   ([id] (encode-svg-cursor id default-rotation default-hotspot-x default-hotspot-y default-height))
   ([id rotation] (encode-svg-cursor id rotation default-hotspot-x default-hotspot-y default-height))
   ([id rotation x y] (encode-svg-cursor id rotation x y default-height))
-  ([id rotation x y height] (encode-svg-cursor id rotation x y height)))
+  ([id rotation x y height] (encode-svg-cursor id rotation x y height))
+  ([id rotation x y height css?] (encode-svg-cursor id rotation x y height css?)))
 
 (defmacro cursor-fn
   "Creates a dynamic cursor that can be rotated in runtime"
