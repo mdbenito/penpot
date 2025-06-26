@@ -594,7 +594,7 @@
   [modif-tree & {:keys [ignore-constraints ignore-snap-pixel snap-ignore-axis undo-group]
                  :or {ignore-constraints false ignore-snap-pixel false snap-ignore-axis nil undo-group nil}
                  :as params}]
-  (ptk/reify ::apply-wasm-modifiesr
+  (ptk/reify ::apply-wasm-modifiers
     ptk/WatchEvent
     (watch [_ state _]
       (let [objects          (dsh/lookup-page-objects state)
@@ -801,9 +801,9 @@
 (defn apply-modifiers
   ([]
    (apply-modifiers nil))
-  ([{:keys [modifiers undo-transation? ignore-constraints
+  ([{:keys [modifiers undo-transaction? ignore-constraints
             ignore-snap-pixel page-id]
-     :or {undo-transation? true  ignore-constraints false
+     :or {undo-transaction? true ignore-constraints false
           ignore-snap-pixel false}
      :as options}]
    (ptk/reify ::apply-modifiers
@@ -822,7 +822,7 @@
              (js/Symbol)]
 
          (rx/concat
-          (if undo-transation?
+          (if undo-transaction?
             (rx/of (dwu/start-undo-transaction undo-id))
             (rx/empty))
           (rx/of (apply-modifiers* objects object-modifiers text-modifiers options)
@@ -832,6 +832,6 @@
           (if (nil? modifiers)
             (rx/of (clear-local-transform))
             (rx/empty))
-          (if undo-transation?
+          (if undo-transaction?
             (rx/of (dwu/commit-undo-transaction undo-id))
             (rx/empty))))))))
