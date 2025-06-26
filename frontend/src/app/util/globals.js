@@ -30,6 +30,7 @@ goog.scope(function () {
       addEventListener(...args) {},
       removeEventListener(...args) {},
       dispatchEvent(...args) { return true; },
+      pointerLockElement: null,
     };
   }
 
