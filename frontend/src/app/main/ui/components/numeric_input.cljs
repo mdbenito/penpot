@@ -38,7 +38,7 @@
     [app.main.data.workspace.undo :as dwu]
     [app.main.refs :as refs]
     [app.main.store :as st]
-    [app.main.ui.css-cursors :as cur]
+    [app.main.ui.cursors :as cur]
     [app.main.ui.formats :as fmt]
     [app.main.ui.hooks :as h]
     [app.util.dom :as dom]
@@ -51,11 +51,12 @@
     [beicon.v2.core :as rx]
     [cljs.core :as c]
     [cuerdas.core :as str]
-    [potok.v2.core :as ptk]
+    [okulary.core :as l]
     [rumext.v2 :as mf]))
 
 (def ^:private ^:const default-input-debounce-ms 800)
 (def ^:private ^:const default-input-drag-sensitivity 1)
+(def ^:private ^:const default-input-drag-start-sensitivity 6)  ; pixels
 (def ^:private ^:const default-input-large-step 10)
 (def ^:private ^:const default-input-small-step 0.1)
 
@@ -139,9 +140,42 @@
   [ob]
   (rx/pipe (repeat*) ob))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Cursor handling
 
+;; HACK: Create a fake cursor element to be used for drag operations.
+;;       This is ad-hoc and just a PoC
+(defonce cursor-el
+  (let [el (.createElement js/document "div")]
+    (set! (.-id el) "fake-cursor")
+    (js/Object.assign
+     (.-style el)
+     #js {:position           "fixed"
+          :top                "0"
+          :left               "0"
+          :width              "20px"
+          :height             "20px"
+          :border             "2px solid deepskyblue"
+          :borderRadius       "50%"
+          :pointerEvents      "none"
+          :zIndex             2147483647
+          :backgroundSize     "contain"
+          :backgroundRepeat   "no-repeat"
+          :backgroundPosition "center"
+          :transform          "translate(-9999px,-9999px)"})
+    el))
+
+
+(defn move-cursor! [^Point pt]
+  (aset (.-style cursor-el) "transform"
+        (str "translate(" (:x pt) "px," (:y pt) "px)")))
+
+(defn viewport-size []
+  (gpt/point (.-innerWidth js/window) (.-innerHeight js/window)))
+
+
+;;; FIXME: HACK this is dynamically recreating the cursor SVG
+;;; upon each call.
 (defn- cursor-from-direction
   "Returns the cursor class name based on the direction keyword.
 
@@ -151,12 +185,12 @@
    Returns a string representing the cursor class name."
   [direction]
   (case direction
-    :ew (cur/get-dynamic "resize-ew" 0)
-    :we (cur/get-dynamic "resize-ew" 180)
-    :ns (cur/get-dynamic "resize-ns" 0)
-    :sn (cur/get-dynamic "resize-ns" 180)
-    :rotate (cur/get-dynamic "resize-ew" 180)
-    (cur/get-static "default")))
+    :ew (cur/cursor-ref :resize-h 0 12 12 20 false)
+    :we (cur/cursor-ref :resize-h 180 12 12 20 false)
+    :ns (cur/cursor-ref :resize-h 90 12 12 20 false)
+    :sn (cur/cursor-ref :resize-h 270 12 12 20 false)
+    :rotate (cur/cursor-ref :resize-h 180 0 0  20 false)
+    (cur/cursor-ref :resize-h 0 12 12 20 false)))
 
 (defn set-drag-cursor
   "Sets the cursor style for dragging operations by toggling a class on <body>.
@@ -169,17 +203,16 @@
 
    Args:
      direction - (optional) keyword indicating direction (:ew, :ns, :rotate)"
-  [direction]
-  (ptk/reify ::set-drag-cursor
-    ptk/EffectEvent
-    (effect [_ _ _]
-      (let [body (.-body globals/document)
-            classes (.-classList body)
-            class (cursor-from-direction direction)]
-        (doseq [c (filter #(str/starts-with? % "cursor-") classes)]
-          (.remove classes c))
-        (when (not= class "default")
-          (.add (.-classList body) class))))))
+  [direction node]
+  (let [cursor (cursor-from-direction direction)]
+    (if direction
+      (.requestPointerLock node)
+      (.exitPointerLock globals/document))
+    (aset cursor-el "hidden" (nil? direction))
+    (aset (.-style cursor-el) "backgroundImage" cursor)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Dimension extraction for drag operations
 
 (defn- dim-from-direction
   "Given a direction keyword, returns a function that extracts the relevant
@@ -244,7 +277,7 @@
 
            :else @initial))))))
 
-(defn- compute-delta*
+(defn- compute-value*
   ""
   [wrap-value? min-value max-value step-value parse-value default]
   (fn [^js event ^boolean up? ^boolean down?]
@@ -285,68 +318,92 @@
 
 (defn- drag-stream
   ""
-  [node compute-delta direction]
-  (let [sensitivity (get refs/workspace-layout :input-drag-sensitivity default-input-drag-sensitivity)
-        get-dim     (dim-from-direction direction)
+  [node compute-value direction pos-ref]
+  (let [sensitivity       (get refs/workspace-layout :input-drag-sensitivity default-input-drag-sensitivity)
+        start-sensitivity (get refs/workspace-layout :input-drag-start-sensitivity default-input-drag-start-sensitivity)
 
-        make-change
-        (fn [[prev curr]]
-          (let [prev-pos (dom/get-client-position prev)
-                curr-pos (dom/get-client-position curr)
-                delta    (gpt/subtract curr-pos prev-pos)
-                diff     (get-dim delta)
-                up?      (> diff 0)
-                down?    (< diff 0)
-                value    (when (> (abs diff) sensitivity)
-                           (compute-delta curr up? down?))]
-            [value curr]))
+        get-dim      (dim-from-direction direction)
+        move-cursor! (fn [^js ev]
+                       (let [delta (gpt/point (.-movementX ev) (.-movementY ev))
+                            ;; wrap around viewport
+                             pt    (gpt/add @pos-ref delta)
+                             new-pos (gpt/mod pt (viewport-size))]
+                         (reset! pos-ref new-pos)
+                         (move-cursor! new-pos)))
+
+        make-change-event
+        (fn [^js ev]
+          (let [delta (gpt/point (.-movementX ev) (.-movementY ev))
+                diff  (get-dim delta)
+                up?   (> diff 0)
+                down? (< diff 0)
+                value (when (> (abs diff) sensitivity)
+                        (compute-value ev up? down?))]
+            [value ev]))
 
         start-s
-        (->> (from-event node "dragstart" #js {:passive false})
-            ;;  (rx/tap #(js/console.log "drag-stream: START with event type" (.-type ^js %)))
-             (rx/tap dom/prevent-default)
-             (rx/tap dom/stop-propagation)
-             (rx/share))
+        (->> (from-event node "pointerdown" #js {:passive false})
+             (rx/map dom/get-client-position)
+             ;; set the reference position such that the div
+             ;; is centered around the cursor
+             (rx/tap #(reset! pos-ref (gpt/subtract % (gpt/point 10 10)))))
+
         end-s
         (->> (rx/merge
-              (mse/drag-stopper st/stream)
+              (mse/drag-stopper st/stream {:blur? false})
               (->> (rx/merge
                     (from-event node "dragend")
                     (from-event globals/window "pointerup")
                     (->> (from-event node "keydown")
-                         (rx/filter kbd/esc?)))
-                   (rx/tap dom/prevent-default)
-                   (rx/tap dom/stop-immediate-propagation)
-                   (rx/tap #(set-drag-cursor nil))
-                   (rx/tap #(dom/select-text! node))))
-            ;;  (rx/tap #(js/console.log "drag-stream: END with event type" (.-type ^js %)))
-             (rx/share))
+                         (rx/filter kbd/esc?))))))
 
-        ;; Builds the inner stream that emits drag events
+        ;; Builds the inner stream that emits drag events: [new-value event]
         make-drag-s
-        (fn [_start-ev]
-          (let [move-s  (->> (from-event globals/window "pointermove")
-                             (pairwise)
-                             (rx/share))
+        (fn [start-ev]
+          (let [dragging? (l/atom false)
+
+                set-dragging-flag
+                (fn [^js e]
+                  (let [drag? (or @dragging?
+                                  (> (gpt/distance (dom/get-client-position e) start-ev)
+                                     start-sensitivity))]
+                    (set! (.-dragging? e) (reset! dragging? drag?))
+                    e))
+
+                move-s (->> (from-event globals/window "pointermove")
+                            (rx/map set-dragging-flag)
+                            (rx/filter #(.-dragging? ^js %))
+                            (rx/tap dom/prevent-default)
+                            (rx/tap dom/stop-propagation)
+                            (rx/tap dom/stop-immediate-propagation)
+                            (rx/share))
+
                 begin   (->> move-s
                              (rx/first)
-                             (rx/map make-change)
-                             (rx/tap #(set-drag-cursor direction)))
+                             (rx/tap #(set-drag-cursor direction node))
+                             (rx/map make-change-event))
+
                 updates (->> move-s
-                             (rx/map make-change))
+                             (rx/skip 1)
+                             (rx/map make-change-event))
+
                 end     (->> end-s
-                             (rx/map (fn [^js e] [nil e])))]
+                             (rx/map #(vector nil %))
+                             (rx/tap #(reset! dragging? false))
+                             (rx/tap #(set-drag-cursor nil node))
+                             (rx/first))]
 
             (rx/concat
              (->> (rx/merge begin updates)
-                  (rx/filter #(dm/nnil? (first %)))
-                  (rx/take-until end-s))
+                  (rx/tap #(move-cursor! (second %)))
+                  (rx/take-until end))
              end)))]
-    (exhaust-map make-drag-s start-s)))
+    (->> (exhaust-map make-drag-s start-s)
+         (rx/skip-last 1))))
 
 (defn- keyboard-stream
   ""
-  [node compute-delta parse-value]
+  [node compute-value parse-value initial-value*]
   (let [up?      #(or (kbd/up-arrow? %) (kbd/page-up? %))
         down?    #(or (kbd/down-arrow? %) (kbd/page-down? %))
         is-step? #(or (up? %) (down? %))
@@ -360,7 +417,7 @@
                     (rx/filter is-step?)
                     (rx/tap dom/prevent-default)
                     (rx/tap dom/stop-propagation)
-                    (rx/map (fn [e] [(compute-delta e (up? e) (down? e)) e])))
+                    (rx/map (fn [e] [(compute-value e (up? e) (down? e)) e])))
 
         accept-s (->> event-s
                       (rx/filter accept?)
@@ -368,29 +425,25 @@
 
         cancel-s (->> event-s
                       (rx/filter cancel?)
-                      ; FIXME: mimicking current behavior means that ESC accepts
-                      ; the current value, which is IMHO unexpected.
-                      ; Instead we could do something like:
-                      ; (rx/map (fn [e] [@initial-value* e]))
-                      (rx/map (fn [e] [(parse-value) e]))
+                      (rx/map (fn [e] [@initial-value* e]))
                       (rx/tap #(dom/blur! node)))]
 
     (rx/merge step-s accept-s cancel-s)))
 
-(defn wheel-delta [^js event compute-delta]
+(defn wheel-delta [^js event compute-value]
   (let [event* ^js (nw/normalize-wheel event)
         delta-pt   (gpt/point (.-spinX event*) (.-spinY event*))
         get-dim    (dim-from-direction :sn)
         delta      (get-dim delta-pt)
         up?        (> delta 0)
         down?      (< delta 0)]
-    (compute-delta event up? down?)))
+    (compute-value event up? down?)))
 
 (defn wheel-stream
   ""
-  [node compute-delta]
+  [node compute-value]
   (let [make-change (fn [^js event]
-                      [(wheel-delta event compute-delta) event])]
+                      [(wheel-delta event compute-value) event])]
     (->> (from-event node "wheel" #js {:passive false})
          (rx/tap dom/prevent-default)
          (rx/tap dom/stop-immediate-propagation)
@@ -421,7 +474,6 @@
         title        (unchecked-get props "title")
         default      (unchecked-get props "default")
         nillable?    (unchecked-get props "nillable")
-        class        (d/nilv (unchecked-get props "className") "")
 
         min-value    (d/parse-double min-value)
         max-value    (d/parse-double max-value)
@@ -437,7 +489,7 @@
         ref         (or external-ref local-ref)
 
         ;; This is used as initial value for simple math expression
-        ;; evaluation. FIXME: this is not really working as it should
+        ;; evaluation. 
         initial-value* (mf/use-var (when (not= :multiple value-str)
                                      (d/parse-double value-str default)))
 
@@ -450,6 +502,7 @@
 
         unmount-s (mf/use-memo #(rx/subject))
 
+        sub (mf/use-var nil)
 
         ;; fn that parses the value from the input element, applying
         ;; min and max constraints, and returning a default value if the input
@@ -459,7 +512,7 @@
         ;; Function that computes the delta value based on the current value,
         ;; min and max values, step value, and the parse function.
         ;; This is used for wheel, up/down and drag interactions.
-        compute-delta (compute-delta* wrap-value? min-value max-value step-value parse-value default)
+        compute-value (compute-value* wrap-value? min-value max-value step-value parse-value default)
 
         ;; Called on every modification of the input value not handled via the change-s,
         ;; e.g. number input, paste, etc.
@@ -468,10 +521,6 @@
          (mf/deps parse-value curr-value*)
          (fn [^js _event]
            (when-let [new-value (parse-value)]
-            ;;  (js/console.log "handle-change called with "
-            ;;                  "curr-value*:" @curr-value*
-            ;;                  "new-value:" new-value
-            ;;                  "event:" (if event (.-type event) "nil"))
              (reset! curr-value* new-value))))
 
         ;; Called on changes induced by drag, wheel, keyboard up/down
@@ -481,20 +530,19 @@
          (fn [new-value ^js event]
            (when new-value
              (reset! curr-value* new-value)
-            ;;  (js/console.log "on-change' called with parse-value:" (parse-value)
-            ;;                  "curr-value*:" @curr-value*
-            ;;                  "event:" (if event (.-type event) "nil"))
              (when-let [node (mf/ref-val ref)]
                (dom/set-value! node (fmt/format-number new-value)))
              (on-change new-value event))))
 
         on-unmount
         (mf/use-fn
-         (mf/deps unmount-s ref curr-value* initial-value*)
+         (mf/deps unmount-s ref curr-value* initial-value* sub)
          (fn [^js event]
-           (st/emit! (set-drag-cursor nil))
+           (set-drag-cursor nil (mf/ref-val ref))
            (when (not= @curr-value* @initial-value*)
              (rx/push! change-s [@curr-value* event]))
+           (when @sub
+             (rx/dispose! @sub))
            ;; FIXME: Is this needed to free resources in change-s?
            ;; Should I rather call rx/end! on change-s?
            (.next unmount-s)))
@@ -508,10 +556,14 @@
            (when (fn? on-blur)
              (on-blur event))))
 
+        ;; reference starting position for synthethic cursor during drag operations
+        ;; initialized to an arbitrary point
+        pos-ref (mf/use-var (gpt/point 0 0))
+
         on-focus'
         (mf/use-fn
          (mf/deps ref on-focus select-on-focus? on-change parse-value
-                  initial-value* curr-value* default)
+                  initial-value* curr-value* default sub)
          (fn [event]
            (reset! curr-value* (or (parse-value) default))
            (when (fn? on-focus)
@@ -523,17 +575,16 @@
                    stopper    (rx/merge
                                unmount-s
                                (from-event input-node "blur" #js {:passive false :once true}))
-                   wheel-s    (wheel-stream input-node compute-delta)
-                   drag-s     (drag-stream input-node compute-delta drag-direction)
-                   keyboard-s (keyboard-stream input-node compute-delta parse-value)
+                   wheel-s    (wheel-stream input-node compute-value)
+                   drag-s     (drag-stream input-node compute-value drag-direction pos-ref)
+                   keyboard-s (keyboard-stream input-node compute-value parse-value initial-value*)
                    change-s'  (->> (rx/merge wheel-s drag-s keyboard-s)
+                                   (rx/filter #(dm/nnil? (first %)))
                                    (rx/take-until stopper))]
-               (rx/sub! change-s' (partial rx/push! change-s)
-                        ;; {:next (partial rx/push! change-s)
-                        ;;            :error (fn [e] (js/console.error "Error in change stream:" e))
-                        ;;            :complete #(js/console.log "Change stream completed")}) 
-                        )))
+               (reset! sub (rx/sub! change-s' (partial rx/push! change-s)))))
 
+           ;; FIXME: select on focus conflicts with the drag start condition making clicking on the
+           ;; input impossible.
            (when select-on-focus?
              (let [target (dom/get-target event)]
                (dom/select-text! target)
@@ -546,13 +597,23 @@
                   (obj/unset! "nillable")
                   (obj/set! "onChange" handle-change)
                   (obj/set! "value" mf/undefined)
-                  (obj/set! "className" (str/join " " [class (cursor-from-direction drag-direction)]))
                   (obj/set! "type" "text")
                   (obj/set! "ref" ref)
                   (obj/set! "defaultValue" (fmt/format-number @initial-value*))
                   (obj/set! "title" title)
+                  (obj/set! "draggable" false)  ; FIXME: Does this make sense?
                   (obj/set! "onBlur" on-blur')
+                  (obj/set! "onDragStart" dom/prevent-default)
                   (obj/set! "onFocus" on-focus'))]
+
+    (mf/with-effect [ref]
+      ;; Initialize the input value on mount
+      ;; mount once at app start-up
+      ;; append cursor-el only if the document body does not have cursor-as child:
+      (when-not (.contains js/document.body cursor-el)
+        (.appendChild js/document.body cursor-el))
+      #(when (.contains js/document.body cursor-el)
+         (.removeChild js/document.body cursor-el)))
 
     (mf/with-effect [initial-value* on-unmount ref]
       (when-let [input-node (mf/ref-val ref)]
@@ -560,7 +621,6 @@
       #(on-unmount #js {:type "unmount"}))
 
     (mf/with-effect [change-s on-change']  ;
-      ;; (js/console.log "Subscribing to change stream")
       (let [sub (rx/sub! change-s (partial apply on-change'))]
         #(rx/dispose! sub)))
 
@@ -594,7 +654,6 @@
              (js/clearTimeout @timer))
            (reset! timer nil)
            (when @transaction-id
-            ;;  (js/console.log "Committing transaction" (subs (str @transaction-id) 0 6))
              (st/emit! (dwu/commit-undo-transaction @transaction-id))
              (reset! transaction-id nil))))
 
@@ -606,26 +665,14 @@
         (mf/use-fn
          (mf/deps on-change transaction-id timer local-value*)
          (fn [value ^js event]
-          ;;  (js/console.log "on-change wrapper -- "
-          ;;                  "value:" value
-          ;;                  "local value:" @local-value*
-          ;;                  "event:" (if event (.-type event) "nil")
-          ;;                  "transaction-id:" (subs (str @transaction-id) 0 6)
-          ;;                  "timer:" @timer)
-
            (when (and value (not= @local-value* value))
              (when @timer
                (js/clearTimeout @timer))
-            ;;  (js/console.log "Setting new timer for commit")
              (reset! timer (js/setTimeout commit debounce-ms))
-
              (reset! local-value* value)
              (when (nil? @transaction-id)
                (reset! transaction-id (uuid/next))
-              ;;  (js/console.log "Starting new transaction" (subs (str @transaction-id) 0 6))
                (st/emit! (dwu/start-undo-transaction @transaction-id {:timeout 0})))
-
-            ;;  (js/console.log "Updating value in transaction" (subs (str @transaction-id) 0 6))
              (on-change value event true))))
 
         ;; Blur events always commit the current transaction.
@@ -633,7 +680,6 @@
         (mf/use-fn
          (mf/deps on-blur on-change')
          (fn [^js event]
-          ;;  (js/console.log "on-blur wrapper -- event:" (if event (.-type event) "nil"))
            (commit)
            (when (fn? on-blur)
              (on-blur event))))
