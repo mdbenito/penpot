@@ -5,7 +5,7 @@
 ;; Copyright (c) KALEIDOS INC
 
 (ns app.common.geom.point
-  (:refer-clojure :exclude [divide min max abs zero?])
+  (:refer-clojure :exclude [divide min max abs zero? mod])
   (:require
    #?(:clj [app.common.fressian :as fres])
    #?(:cljs [cljs.core :as c]
@@ -145,7 +145,7 @@
   coordinates of the point as a new point."
   [p1 p2]
   (dm/assert!
-   "arguments should be point instance"
+   "arguments should be point instances"
    (and (point? p1)
         (point? p2)))
 
@@ -159,7 +159,7 @@
   coordinates of the point as a new point."
   [p1 p2]
   (dm/assert!
-   "arguments should be pointer instance"
+   "point/subtract: arguments should be pointer instances"
    (and (point? p1)
         (point? p2)))
 
@@ -174,7 +174,7 @@
   [p1 p2]
   (assert (and (point? p1)
                (point? p2))
-          "arguments should be pointer instance")
+          "point/multiply: arguments should be pointer instances")
   (pos->Point (* (dm/get-prop p1 :x)
                  (dm/get-prop p2 :x))
               (* (dm/get-prop p1 :y)
@@ -184,11 +184,20 @@
   [p1 p2]
   (assert (and (point? p1)
                (point? p2))
-          "arguments should be pointer instance")
+          "point/divide: arguments should be pointer instances")
   (pos->Point (/ (dm/get-prop p1 :x)
                  (dm/get-prop p2 :x))
               (/ (dm/get-prop p1 :y)
                  (dm/get-prop p2 :y))))
+
+(defn mod
+  "Applies a point-wise modulo operation to the first argument
+   using the second argument as a divisor."
+  [pt divisors]
+  (assert (and (point? pt) (point? divisors))
+          "point/mod: arguments should be point instances")
+  (pos->Point (c/mod (dm/get-prop pt :x) (dm/get-prop divisors :x))
+              (c/mod (dm/get-prop pt :y) (dm/get-prop divisors :y))))
 
 (defn min
   ([] nil)
