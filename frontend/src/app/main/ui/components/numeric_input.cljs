@@ -5,7 +5,7 @@
 ;; Copyright (c) KALEIDOS INC
 
  (ns app.main.ui.components.numeric-input
-   "A numeric input component with support for mouse wheel input.
+   "A numeric input component with support for mouse wheel and drag input.
 
     Supported props:
       - `:value` - the current value of the input
@@ -34,13 +34,10 @@
     [app.common.data.macros :as dm]
     [app.common.geom.point :as gpt]
     [app.common.schema :as sm]
-    [app.common.uuid :as uuid]
-    [app.main.data.workspace.undo :as dwu]
     [app.main.refs :as refs]
     [app.main.store :as st]
     [app.main.ui.cursors :as cur]
     [app.main.ui.formats :as fmt]
-    [app.main.ui.hooks :as h]
     [app.util.dom :as dom]
     [app.util.dom.normalize-wheel :as nw]
     [app.util.globals :as globals]
@@ -54,7 +51,6 @@
     [okulary.core :as l]
     [rumext.v2 :as mf]))
 
-(def ^:private ^:const default-input-debounce-ms 800)
 (def ^:private ^:const default-input-drag-sensitivity 1)
 (def ^:private ^:const default-input-drag-start-sensitivity 6)  ; pixels
 (def ^:private ^:const default-input-large-step 10)
@@ -62,15 +58,6 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; TODO: Remove once the two PRs in beicon are merged
-
-(def ^function pairwise*
-  rxjs/pairwise)
-
-(defn pairwise
-  "Groups pairs of consecutive emissions together and emits them in tuples."
-  [ob]
-  (rx/pipe (pairwise*) ob))
-
 
 (defn from-event
   "Creates an Observable by attaching an event listener to an event target
@@ -81,25 +68,17 @@
   ([et ev & [opts]]
    (rxjs/fromEvent et ev (clj->js (or opts {})))))
 
-(def ^function start-with*
-  rxjs/startWith)
+(def ^function exhaust-map*
+  rxjs/exhaustMap)
 
-(defn start-with
-  "Emits the provided value before any other emissions from the source Observable."
-  [& args]
-  (let [values (butlast args)
-        ob     (last args)]
-    (rx/pipe (apply start-with* values) ob)))
-
-(def ^function end-with*
-  rxjs/endWith)
-
-(defn end-with
-  "Emits the provided value(s) after all other emissions from the source Observable."
-  [& args]
-  (let [values (butlast args)
-        ob     (last args)]
-    (rx/pipe (apply end-with* values) ob)))
+(defn exhaust-map
+  "Maps each value from the source Observable to an Observable, but ignores
+   subsequent values until the inner Observable completes.
+   Args:
+     f: a function that takes a value and returns an Observable
+     ob: the source Observable "
+  [f ob]
+  (rx/pipe (exhaust-map* f) ob))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; TODO more beicon PRs
@@ -115,20 +94,6 @@
       ob:         the source Observable to group into windows "
   [boundaries ob]
   (rx/pipe (window* boundaries) ob))
-
-
-(def ^function exhaust-map*
-  rxjs/exhaustMap)
-
-(defn exhaust-map
-  "Maps each value from the source Observable to an Observable, but ignores
-   subsequent values until the inner Observable completes.
-   Args:
-     f: a function that takes a value and returns an Observable
-     ob: the source Observable "
-  [f ob]
-  (rx/pipe (exhaust-map* f) ob))
-
 
 (def ^function repeat*
   rxjs/repeat)
@@ -155,8 +120,8 @@
           :left               "0"
           :width              "20px"
           :height             "20px"
-          :border             "2px solid deepskyblue"
-          :borderRadius       "50%"
+          ;; :border             "2px solid deepskyblue"
+          ;; :borderRadius       "50%"
           :pointerEvents      "none"
           :zIndex             2147483647
           :backgroundSize     "contain"
@@ -623,73 +588,6 @@
     (mf/with-effect [change-s on-change']  ;
       (let [sub (rx/sub! change-s (partial apply on-change'))]
         #(rx/dispose! sub)))
-
     [:> :input props]))
 
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Transactional Input wrapper
-
-(def ^:private schema:transactional-input  ;TODO
-  [:map
-   [:label {:optional true} :string]
-   [:class {:optional true} :string]])
-
-(mf/defc transactional-input*
-  "A component that wraps a numeric input allowing for transactional changes."
-  {::mf/forward-ref true}
-  ;;  ::mf/schema schema:transactional-input
-
-  [{:keys [on-change on-blur] :rest props} _ref]
-  (let [debounce-ms    (get refs/workspace-layout :input-debounce-ms default-input-debounce-ms)
-        transaction-id (mf/use-var nil)
-        local-value*   (mf/use-var nil) ;; Holds the current value of the input
-        timer          (mf/use-var nil) ;; Timer for committing the transaction
-
-        commit
-        (mf/use-fn
-         (mf/deps transaction-id timer)
-         (fn []
-           (when @timer
-             (js/clearTimeout @timer))
-           (reset! timer nil)
-           (when @transaction-id
-             (st/emit! (dwu/commit-undo-transaction @transaction-id))
-             (reset! transaction-id nil))))
-
-        ;; Handles changes to the input value, starting a transaction if needed.
-        ;; Args:
-        ;;   - value: the new value of the input
-        ;;   - event: the JS event that triggered the change
-        on-change'
-        (mf/use-fn
-         (mf/deps on-change transaction-id timer local-value*)
-         (fn [value ^js event]
-           (when (and value (not= @local-value* value))
-             (when @timer
-               (js/clearTimeout @timer))
-             (reset! timer (js/setTimeout commit debounce-ms))
-             (reset! local-value* value)
-             (when (nil? @transaction-id)
-               (reset! transaction-id (uuid/next))
-               (st/emit! (dwu/start-undo-transaction @transaction-id {:timeout 0})))
-             (on-change value event true))))
-
-        ;; Blur events always commit the current transaction.
-        on-blur'
-        (mf/use-fn
-         (mf/deps on-blur on-change')
-         (fn [^js event]
-           (commit)
-           (when (fn? on-blur)
-             (on-blur event))))
-
-        on-unmount (h/use-ref-callback commit)
-
-        props (mf/spread-props props {:on-change on-change' :on-blur on-blur'})]
-
-    ;; Always commit on unmount
-    (mf/with-effect [on-unmount] on-unmount)
-
-    [:> numeric-input* props]))
 

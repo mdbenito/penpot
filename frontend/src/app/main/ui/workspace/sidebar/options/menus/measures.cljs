@@ -21,8 +21,8 @@
    [app.main.refs :as refs]
    [app.main.store :as st]
    [app.main.ui.components.dropdown :refer [dropdown]]
-   [app.main.ui.components.numeric-input :refer [numeric-input* transactional-input*]]
    [app.main.ui.components.radio-buttons :refer [radio-button radio-buttons]]
+   [app.main.ui.components.transactional :refer [transactional-numeric-input*]]
    [app.main.ui.ds.buttons.icon-button :refer [icon-button*]]
    [app.main.ui.ds.foundations.assets.icon :as ds-i]
    [app.main.ui.hooks :as hooks]
@@ -347,26 +347,26 @@
                                     :disabled disabled-width-sizing?)
                :title (tr "workspace.options.width")}
          [:span {:class (stl/css :icon-text)} "W"]
-         [:> transactional-input* {:min 0.01
-                                   :no-validate true
-                                   :placeholder (if (= :multiple (:width values)) (tr "settings.multiple") "--")
-                                   :on-change on-width-change
-                                   :disabled disabled-width-sizing?
-                                   :drag-direction "ew"
-                                   :class (stl/css :numeric-input)
-                                   :value (:width values)}]]
+         [:> transactional-numeric-input* {:min 0.01
+                                           :no-validate true
+                                           :placeholder (if (= :multiple (:width values)) (tr "settings.multiple") "--")
+                                           :on-change on-width-change
+                                           :disabled disabled-width-sizing?
+                                           :drag-direction "ew"
+                                           :class (stl/css :numeric-input)
+                                           :value (:width values)}]]
         [:div {:class (stl/css-case :height true
                                     :disabled disabled-height-sizing?)
                :title (tr "workspace.options.height")}
          [:span {:class (stl/css :icon-text)} "H"]
-         [:> transactional-input* {:min 0.01
-                                   :no-validate true
-                                   :placeholder (if (= :multiple (:height values)) (tr "settings.multiple") "--")
-                                   :on-change on-height-change
-                                   :drag-direction "sn"
-                                   :disabled disabled-height-sizing?
-                                   :class (stl/css :numeric-input)
-                                   :value (:height values)}]]
+         [:> transactional-numeric-input* {:min 0.01
+                                           :no-validate true
+                                           :placeholder (if (= :multiple (:height values)) (tr "settings.multiple") "--")
+                                           :on-change on-height-change
+                                           :drag-direction "sn"
+                                           :disabled disabled-height-sizing?
+                                           :class (stl/css :numeric-input)
+                                           :value (:height values)}]]
 
         [:> icon-button* {:variant "ghost"
                           :icon (if proportion-lock "lock" "unlock")
@@ -380,41 +380,40 @@
                                     :disabled disabled-position-x?)
                :title (tr "workspace.options.x")}
          [:span {:class (stl/css :icon-text)} "X"]
-         [:> transactional-input* {:no-validate true
-                                   :placeholder (if (= :multiple (:x values)) (tr "settings.multiple") "--")
-                                   :on-change on-pos-x-change
-                                   :drag-direction "ew"
-                                   :disabled disabled-position-x?
-                                   :class (stl/css :numeric-input)
-                                   :value (:x values)}]]
+         [:> transactional-numeric-input* {:no-validate true
+                                           :placeholder (if (= :multiple (:x values)) (tr "settings.multiple") "--")
+                                           :on-change on-pos-x-change
+                                           :drag-direction "ew"
+                                           :disabled disabled-position-x?
+                                           :class (stl/css :numeric-input)
+                                           :value (:x values)}]]
 
         [:div {:class (stl/css-case :y-position true
                                     :disabled disabled-position-y?)
                :title (tr "workspace.options.y")}
          [:span {:class (stl/css :icon-text)} "Y"]
-         [:> transactional-input* {:no-validate true
-                                   :placeholder (if (= :multiple (:y values)) (tr "settings.multiple") "--")
-                                   :disabled disabled-position-y?
-                                   :on-change on-pos-y-change
-                                   :drag-direction "ns"
-                                   :class (stl/css :numeric-input)
-                                   :value (:y values)}]]])
+         [:> transactional-numeric-input* {:no-validate true
+                                           :placeholder (if (= :multiple (:y values)) (tr "settings.multiple") "--")
+                                           :disabled disabled-position-y?
+                                           :on-change on-pos-y-change
+                                           :drag-direction "ns"
+                                           :class (stl/css :numeric-input)
+                                           :value (:y values)}]]])
      (when (or (options :rotation) (options :radius))
        [:div {:class (stl/css :rotation-radius)}
         (when (options :rotation)
           [:div {:class (stl/css :rotation)
                  :title (tr "workspace.options.rotation")}
            [:span {:class (stl/css :icon)}  i/rotation]
-           [:> transactional-input*
-            {:no-validate true
-             :min -359
-             :max 359
-             :data-wrap true
-             :placeholder (if (= :multiple (:rotation values)) (tr "settings.multiple") "--")
-             :on-change on-rotation-change
-             :drag-direction "rotate"
-             :class (stl/css :numeric-input)
-             :value (:rotation values)}]])
+           [:> transactional-numeric-input* {:no-validate true
+                                             :min -359
+                                             :max 359
+                                             :data-wrap true
+                                             :placeholder (if (= :multiple (:rotation values)) (tr "settings.multiple") "--")
+                                             :on-change on-rotation-change
+                                             :drag-direction "rotate"
+                                             :class (stl/css :numeric-input)
+                                             :value (:rotation values)}]])
         (when (options :radius)
           [:> border-radius-menu* {:class (stl/css :border-radius) :ids ids :ids-with-children ids-with-children :values values :shape shape}])])
      (when (or (options :clip-content) (options :show-in-viewer))
