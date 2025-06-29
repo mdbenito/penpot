@@ -17,8 +17,8 @@
    [app.main.store :as st]
    [app.main.ui.components.color-bullet :as cb]
    [app.main.ui.components.color-input :refer [color-input*]]
-   [app.main.ui.components.numeric-input :refer [numeric-input*]]
    [app.main.ui.components.reorder-handler :refer [reorder-handler]]
+   [app.main.ui.components.transactional :refer [transactional-numeric-input*]]
    [app.main.ui.ds.buttons.icon-button :refer [icon-button*]]
    [app.main.ui.formats :as fmt]
    [app.main.ui.hooks :as h]
@@ -258,16 +258,18 @@
         [:div {:class (stl/css :opacity-element-wrapper)}
          [:span {:class (stl/css :icon-text)}
           "%"]
-         [:> numeric-input* {:value (-> color :opacity opacity->string)
-                             :className (stl/css :opacity-input)
-                             :placeholder "--"
-                             :select-on-focus select-on-focus
-                             :on-focus on-focus
-                             :on-blur on-blur
-                             :on-change handle-opacity-change
-                             :default 100
-                             :min 0
-                             :max 100}]])]
+         [:> transactional-numeric-input*
+          {:value (-> color :opacity opacity->string)
+           :className (stl/css :opacity-input)
+           :placeholder "--"
+           :select-on-focus select-on-focus
+           :on-focus on-focus
+           :on-blur on-blur
+           :on-change handle-opacity-change
+           :default 100
+           :min 0
+           :drag-direction "ew"
+           :max 100}]])]
 
      (when (some? on-remove)
        [:> icon-button* {:variant "ghost"
