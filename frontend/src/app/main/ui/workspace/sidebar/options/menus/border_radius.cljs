@@ -5,7 +5,7 @@
    [app.common.types.shape.radius :as ctsr]
    [app.main.data.workspace.shapes :as dwsh]
    [app.main.store :as st]
-   [app.main.ui.components.numeric-input :refer [numeric-input*]]
+   [app.main.ui.components.transactional :refer [transactional-numeric-input*]]
    [app.main.ui.ds.buttons.icon-button :refer [icon-button*]]
    [app.main.ui.ds.foundations.assets.icon :refer [icon*]]
    [app.main.ui.hooks :as hooks]
@@ -48,10 +48,7 @@
         (mf/use-fn
          (mf/deps ids change-radius)
          (fn [value]
-           (let []
-             (st/emit!
-              (change-radius (fn [shape]
-                               (ctsr/set-radius-to-all-corners shape value)))))))
+           (st/emit! (change-radius #(ctsr/set-radius-to-all-corners % value)))))
 
         on-radius-4-change
         (mf/use-fn
@@ -59,10 +56,10 @@
          (fn [value attr]
            (st/emit! (change-radius #(ctsr/set-radius-to-single-corner % attr value)))))
 
-        on-radius-r1-change #(on-radius-4-change % :r1)
-        on-radius-r2-change #(on-radius-4-change % :r2)
-        on-radius-r3-change #(on-radius-4-change % :r3)
-        on-radius-r4-change #(on-radius-4-change % :r4)
+        on-radius-r1-change #(on-radius-4-change %1 :r1)
+        on-radius-r2-change #(on-radius-4-change %1 :r2)
+        on-radius-r3-change #(on-radius-4-change %1 :r3)
+        on-radius-r4-change #(on-radius-4-change %1 :r4)
 
         expand-stream
         (mf/with-memo []
@@ -83,7 +80,7 @@
         [:> icon* {:icon-id "corner-radius"
                    :size "s"
                    :class (stl/css :icon)}]
-        [:> numeric-input*
+        [:> transactional-numeric-input*
          {:placeholder (cond
                          (not all-equal?)
                          "Mixed"
@@ -94,39 +91,44 @@
           :min 0
           :nillable true
           :on-change on-single-radius-change
+          :drag-direction "ew"
           :value (if all-equal? (:r1 values) nil)}]]
 
        [:div {:class (stl/css :radius-4)}
         [:div {:class (stl/css :small-input)}
-         [:> numeric-input*
+         [:> transactional-numeric-input*
           {:placeholder "--"
            :title (tr "workspace.options.radius-top-left")
            :min 0
            :on-change on-radius-r1-change
+           :drag-direction "ew"
            :value (:r1 values)}]]
 
         [:div {:class (stl/css :small-input)}
-         [:> numeric-input*
+         [:> transactional-numeric-input*
           {:placeholder "--"
            :title (tr "workspace.options.radius-top-right")
            :min 0
            :on-change on-radius-r2-change
+           :drag-direction "ew"
            :value (:r2 values)}]]
 
         [:div {:class (stl/css :small-input)}
-         [:> numeric-input*
+         [:> transactional-numeric-input*
           {:placeholder "--"
            :title (tr "workspace.options.radius-bottom-left")
            :min 0
            :on-change on-radius-r4-change
+           :drag-direction "ew"
            :value (:r4 values)}]]
 
         [:div {:class (stl/css :small-input)}
-         [:> numeric-input*
+         [:> transactional-numeric-input*
           {:placeholder "--"
            :title (tr "workspace.options.radius-bottom-right")
            :min 0
            :on-change on-radius-r3-change
+           :drag-direction "ew"
            :value (:r3 values)}]]])
 
      [:> icon-button* {:class (stl/css-case :selected radius-expanded)
